@@ -94,11 +94,18 @@ class Message(Base):
     source = Column(String(20))  # "hostify", "openphone", "slack", "system"
     content = Column(Text)
     
-    # AI metadata (for outbound)
+    # AI metadata (for outbound messages)
     ai_confidence = Column(Float, nullable=True)
     ai_reasoning = Column(Text, nullable=True)
     was_auto_sent = Column(Boolean, default=False)
     was_human_edited = Column(Boolean, default=False)
+    
+    # AI suggestion (for inbound messages - what AI would have replied)
+    # This is generated when the message comes in, so we can compare later
+    ai_suggested_reply = Column(Text, nullable=True)
+    ai_suggestion_confidence = Column(Float, nullable=True)
+    ai_suggestion_reasoning = Column(Text, nullable=True)
+    ai_suggestion_generated_at = Column(DateTime, nullable=True)
     
     sent_at = Column(DateTime, default=datetime.utcnow)
     

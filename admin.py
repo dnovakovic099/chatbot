@@ -49,6 +49,10 @@ class MessageDetail(BaseModel):
     ai_confidence: Optional[float]
     was_auto_sent: bool
     was_human_edited: bool
+    # AI suggestion (for inbound messages)
+    ai_suggested_reply: Optional[str] = None
+    ai_suggestion_confidence: Optional[float] = None
+    ai_suggestion_reasoning: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -268,7 +272,11 @@ async def get_conversation(conversation_id: int, db: Session = Depends(get_db)):
                 sent_at=m.sent_at,
                 ai_confidence=m.ai_confidence,
                 was_auto_sent=m.was_auto_sent,
-                was_human_edited=m.was_human_edited
+                was_human_edited=m.was_human_edited,
+                # Include AI suggestion for inbound messages
+                ai_suggested_reply=m.ai_suggested_reply,
+                ai_suggestion_confidence=m.ai_suggestion_confidence,
+                ai_suggestion_reasoning=m.ai_suggestion_reasoning
             )
             for m in messages
         ]
@@ -393,6 +401,97 @@ async def generate_suggestion(
             "error": str(e),
             "suggested_reply": None
         }
+
+
+@router.post("/conversations/{conversation_id}/generate-and-save-suggestion")
+async def generate_and_save_suggestion(conversation_id: int, db: Session = Depends(get_db)):
+    """
+    Generate an AI suggestion and save it to the last guest message.
+    
+    This is used when the user clicks "Generate AI Suggestion" in the UI.
+    The suggestion is saved to the database so it persists and can be
+    compared to the actual host response later.
+    """
+    from brain import generate_ai_response, get_style_examples
+    from models import GuestIndex
+    
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    # Get all messages
+    all_messages = db.query(Message).filter(
+        Message.conversation_id == conversation_id
+    ).order_by(Message.sent_at).all()
+    
+    if not all_messages:
+        return {"error": "No messages in conversation"}
+    
+    # Find the last guest message
+    last_guest_msg = None
+    for msg in reversed(all_messages):
+        if msg.direction and msg.direction.value == "inbound":
+            last_guest_msg = msg
+            break
+    
+    if not last_guest_msg:
+        return {"error": "No guest messages found"}
+    
+    try:
+        # Build guest context
+        guest_context = GuestIndex(
+            guest_phone=conv.guest_phone or "unknown",
+            guest_name=conv.guest_name,
+            listing_name=conv.listing_name,
+            check_in_date=conv.check_in_date,
+            check_out_date=conv.check_out_date,
+            source=conv.booking_source or "unknown"
+        )
+        
+        # Get messages up to and including the last guest message
+        msg_idx = all_messages.index(last_guest_msg)
+        messages_for_ai = all_messages[:msg_idx + 1]
+        
+        # Get style examples
+        style_examples = get_style_examples(last_guest_msg.content, n=3)
+        
+        # Generate suggestion
+        ai_response = await generate_ai_response(
+            messages=messages_for_ai,
+            guest_context=guest_context,
+            style_examples=style_examples,
+            conversation_id=conversation_id,
+            use_advanced=False
+        )
+        
+        # Save to the message
+        last_guest_msg.ai_suggested_reply = ai_response.reply_text
+        last_guest_msg.ai_suggestion_confidence = ai_response.confidence_score
+        last_guest_msg.ai_suggestion_reasoning = ai_response.reasoning
+        last_guest_msg.ai_suggestion_generated_at = datetime.utcnow()
+        db.commit()
+        
+        log_event("ai_suggestion_saved", payload={
+            "message_id": last_guest_msg.id,
+            "conversation_id": conversation_id,
+            "confidence": ai_response.confidence_score
+        })
+        
+        return {
+            "success": True,
+            "message_id": last_guest_msg.id,
+            "suggested_reply": {
+                "text": ai_response.reply_text,
+                "confidence": ai_response.confidence_score,
+                "reasoning": ai_response.reasoning,
+                "needs_human_review": ai_response.requires_human
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "success": False}
 
 
 @router.get("/guests", response_model=List[GuestIndexItem])

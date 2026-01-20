@@ -327,7 +327,12 @@ async function selectConversation(id) {
                 </div>
             </div>
             <div class="messages-container">
-                ${conv.messages.map(msg => `
+                ${conv.messages.map((msg, idx) => {
+                    const nextMsg = conv.messages[idx + 1];
+                    const hasAiSuggestion = msg.direction === 'inbound' && msg.ai_suggested_reply;
+                    const nextIsHostReply = nextMsg && nextMsg.direction === 'outbound';
+                    
+                    return `
                     <div class="message ${msg.direction}">
                         <div class="message-sender">${msg.direction === 'inbound' ? '👤 Guest' : '🏠 Host'}</div>
                         <div class="message-content">${escapeHtml(msg.content)}</div>
@@ -338,21 +343,67 @@ async function selectConversation(id) {
                             ${msg.was_human_edited ? ' • Edited' : ''}
                         </div>
                     </div>
-                `).join('')}
+                    ${hasAiSuggestion && nextIsHostReply ? `
+                        <div class="ai-suggestion-inline">
+                            <div class="ai-suggestion-header">
+                                <span class="ai-label">🤖 AI Would Have Said</span>
+                                <span class="ai-confidence ${getConfidenceClass(msg.ai_suggestion_confidence)}">
+                                    ${msg.ai_suggestion_confidence ? (msg.ai_suggestion_confidence * 100).toFixed(0) + '%' : ''}
+                                </span>
+                            </div>
+                            <div class="ai-suggestion-text">${escapeHtml(msg.ai_suggested_reply)}</div>
+                            ${msg.ai_suggestion_reasoning ? `
+                                <div class="ai-suggestion-reasoning">${escapeHtml(msg.ai_suggestion_reasoning)}</div>
+                            ` : ''}
+                        </div>
+                    ` : ''}
+                    ${hasAiSuggestion && !nextIsHostReply && idx === conv.messages.length - 1 ? `
+                        <div class="ai-suggestion-inline pending">
+                            <div class="ai-suggestion-header">
+                                <span class="ai-label">🤖 AI Suggestion Ready</span>
+                                <span class="ai-confidence ${getConfidenceClass(msg.ai_suggestion_confidence)}">
+                                    ${msg.ai_suggestion_confidence ? (msg.ai_suggestion_confidence * 100).toFixed(0) + '%' : ''}
+                                </span>
+                            </div>
+                            <div class="ai-suggestion-text">${escapeHtml(msg.ai_suggested_reply)}</div>
+                            <div class="ai-suggestion-actions">
+                                <button class="btn btn-primary btn-sm" onclick="sendSuggestion(${conv.id}, '${escapeForJs(msg.ai_suggested_reply)}')">
+                                    ✅ Send
+                                </button>
+                                <button class="btn btn-secondary btn-sm" onclick="editSuggestion(${conv.id}, '${escapeForJs(msg.ai_suggested_reply)}')">
+                                    ✏️ Edit
+                                </button>
+                            </div>
+                        </div>
+                    ` : ''}
+                `}).join('')}
             </div>
             
-            <div class="suggestion-panel" id="suggestion-panel-${conv.id}">
-                <div class="suggestion-header">
-                    <span class="suggestion-icon">🤖</span>
-                    <span class="suggestion-title">${conv.needs_response ? 'AI Suggested Response' : 'AI Learning Mode'}</span>
-                </div>
-                <div class="suggestion-empty">
-                    <p>${conv.needs_response ? '💬 Guest is waiting for a response' : '📚 Compare AI vs actual response'}</p>
-                    <button class="btn btn-primary" onclick="generateSuggestion(${conv.id}, ${!conv.needs_response})">
-                        🤖 ${conv.needs_response ? 'Generate AI Suggestion' : 'See What AI Would Say'}
-                    </button>
-                </div>
-            </div>
+            ${(() => {
+                // Check if last guest message has an AI suggestion
+                const lastGuestMsg = [...conv.messages].reverse().find(m => m.direction === 'inbound');
+                const lastMsgIsGuest = conv.messages.length > 0 && conv.messages[conv.messages.length - 1].direction === 'inbound';
+                const hasStoredSuggestion = lastGuestMsg && lastGuestMsg.ai_suggested_reply;
+                
+                // Only show panel if we need a response AND there's no stored suggestion
+                if (lastMsgIsGuest && !hasStoredSuggestion) {
+                    return `
+                        <div class="suggestion-panel" id="suggestion-panel-${conv.id}">
+                            <div class="suggestion-header">
+                                <span class="suggestion-icon">🤖</span>
+                                <span class="suggestion-title">AI Suggested Response</span>
+                            </div>
+                            <div class="suggestion-empty">
+                                <p>💬 Guest is waiting for a response</p>
+                                <button class="btn btn-primary" onclick="generateSuggestionAndSave(${conv.id})">
+                                    🤖 Generate AI Suggestion
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }
+                return '';
+            })()}
         `;
         
         // Auto-scroll to bottom of messages
@@ -362,6 +413,63 @@ async function selectConversation(id) {
         }
     } catch (error) {
         detail.innerHTML = '<div class="empty-state"><span class="empty-icon">❌</span><p>Failed to load conversation</p></div>';
+    }
+}
+
+async function generateSuggestionAndSave(conversationId) {
+    // Generate and save AI suggestion to the message, then reload
+    const panel = document.querySelector('.suggestion-panel');
+    if (panel) {
+        panel.innerHTML = `
+            <div class="suggestion-header">
+                <span class="suggestion-icon">🤖</span>
+                <span class="suggestion-title">Generating...</span>
+            </div>
+            <div class="suggestion-loading">
+                <div class="spinner"></div>
+                <p>Generating and saving AI suggestion...</p>
+            </div>
+        `;
+    }
+    
+    try {
+        const result = await apiPost(`/conversations/${conversationId}/generate-and-save-suggestion`);
+        
+        if (result.success) {
+            // Reload the conversation to show the saved suggestion inline
+            await selectConversation(conversationId);
+        } else {
+            if (panel) {
+                panel.innerHTML = `
+                    <div class="suggestion-header">
+                        <span class="suggestion-icon">❌</span>
+                        <span class="suggestion-title">Error</span>
+                    </div>
+                    <div class="suggestion-error">
+                        <p>${result.error || 'Failed to generate suggestion'}</p>
+                        <button class="btn btn-ghost" onclick="generateSuggestionAndSave(${conversationId})">
+                            🔄 Try Again
+                        </button>
+                    </div>
+                `;
+            }
+        }
+    } catch (error) {
+        console.error("Error generating suggestion:", error);
+        if (panel) {
+            panel.innerHTML = `
+                <div class="suggestion-header">
+                    <span class="suggestion-icon">❌</span>
+                    <span class="suggestion-title">Error</span>
+                </div>
+                <div class="suggestion-error">
+                    <p>${error.message || 'Network error'}</p>
+                    <button class="btn btn-ghost" onclick="generateSuggestionAndSave(${conversationId})">
+                        🔄 Try Again
+                    </button>
+                </div>
+            `;
+        }
     }
 }
 

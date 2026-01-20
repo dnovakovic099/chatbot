@@ -688,6 +688,12 @@ async def sync_single_inbox_thread(inbox_id: str):
                     "guest_name": guest_name,
                     "inbox_id": inbox_id
                 })
+                
+                # Generate and save AI suggestion
+                try:
+                    await _generate_and_save_ai_suggestion(conv, last_msg, db)
+                except Exception as e:
+                    print(f"[Webhook Sync] ⚠️ Failed to generate AI suggestion: {e}")
         
     except Exception as e:
         print(f"[Webhook Sync] ❌ Error syncing inbox {inbox_id}: {e}")
@@ -696,6 +702,63 @@ async def sync_single_inbox_thread(inbox_id: str):
         db.rollback()
     finally:
         db.close()
+
+
+async def _generate_and_save_ai_suggestion(conv, message, db):
+    """
+    Generate an AI suggestion for an inbound message and save it to the database.
+    
+    This is called when a new guest message comes in via webhook.
+    The suggestion is stored so we can compare it to the actual host response later.
+    """
+    from brain import generate_ai_response, get_style_examples
+    from models import Message, GuestIndex
+    
+    print(f"[AI Suggestion] Generating suggestion for message {message.id}...")
+    
+    # Build guest context from conversation
+    guest_context = GuestIndex(
+        guest_phone=conv.guest_phone or "unknown",
+        guest_name=conv.guest_name,
+        listing_name=conv.listing_name,
+        check_in_date=conv.check_in_date,
+        check_out_date=conv.check_out_date,
+        source=conv.booking_source or "unknown"
+    )
+    
+    # Get all messages for context
+    all_messages = db.query(Message).filter(
+        Message.conversation_id == conv.id
+    ).order_by(Message.sent_at).all()
+    
+    # Get style examples
+    style_examples = get_style_examples(message.content, n=3)
+    
+    # Generate AI response
+    ai_response = await generate_ai_response(
+        messages=all_messages,
+        guest_context=guest_context,
+        style_examples=style_examples,
+        conversation_id=conv.id,
+        use_advanced=False  # Use simple mode for speed
+    )
+    
+    # Save the suggestion to the message
+    message.ai_suggested_reply = ai_response.reply_text
+    message.ai_suggestion_confidence = ai_response.confidence_score
+    message.ai_suggestion_reasoning = ai_response.reasoning
+    message.ai_suggestion_generated_at = datetime.utcnow()
+    
+    db.commit()
+    
+    print(f"[AI Suggestion] ✅ Saved suggestion for message {message.id} (confidence: {ai_response.confidence_score:.0%})")
+    
+    log_event("ai_suggestion_generated", payload={
+        "message_id": message.id,
+        "conversation_id": conv.id,
+        "confidence": ai_response.confidence_score,
+        "suggestion_preview": ai_response.reply_text[:100] if ai_response.reply_text else ""
+    })
 
 
 def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
