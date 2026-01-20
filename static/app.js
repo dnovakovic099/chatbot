@@ -341,48 +341,18 @@ async function selectConversation(id) {
                 `).join('')}
             </div>
             
-            ${conv.needs_response ? `
-                <div class="suggestion-panel ${conv.suggested_reply ? '' : 'empty'}">
-                    <div class="suggestion-header">
-                        <span class="suggestion-icon">🤖</span>
-                        <span class="suggestion-title">AI Suggested Response</span>
-                        ${conv.suggested_reply ? `
-                            <span class="suggestion-confidence ${getConfidenceClass(conv.suggested_reply.confidence)}">
-                                ${(conv.suggested_reply.confidence * 100).toFixed(0)}% confident
-                            </span>
-                        ` : ''}
-                    </div>
-                    ${conv.suggested_reply ? `
-                        <div class="suggestion-text">${escapeHtml(conv.suggested_reply.text)}</div>
-                        ${conv.suggested_reply.reasoning ? `
-                            <div class="suggestion-reasoning">
-                                <strong>Reasoning:</strong> ${escapeHtml(conv.suggested_reply.reasoning)}
-                            </div>
-                        ` : ''}
-                        ${conv.suggested_reply.needs_human_review ? `
-                            <div class="suggestion-warning">⚠️ Needs human review before sending</div>
-                        ` : ''}
-                        <div class="suggestion-actions">
-                            <button class="btn btn-primary" onclick="sendSuggestion(${conv.id}, '${escapeForJs(conv.suggested_reply.text)}')">
-                                ✅ Send This Response
-                            </button>
-                            <button class="btn btn-secondary" onclick="editSuggestion(${conv.id}, '${escapeForJs(conv.suggested_reply.text)}')">
-                                ✏️ Edit First
-                            </button>
-                            <button class="btn btn-ghost" onclick="regenerateSuggestion(${conv.id})">
-                                🔄 Regenerate
-                            </button>
-                        </div>
-                    ` : `
-                        <div class="suggestion-empty">
-                            <p>💬 Guest is waiting for a response</p>
-                            <button class="btn btn-primary" onclick="generateSuggestion(${conv.id})">
-                                🤖 Generate AI Suggestion
-                            </button>
-                        </div>
-                    `}
+            <div class="suggestion-panel" id="suggestion-panel-${conv.id}">
+                <div class="suggestion-header">
+                    <span class="suggestion-icon">🤖</span>
+                    <span class="suggestion-title">${conv.needs_response ? 'AI Suggested Response' : 'AI Learning Mode'}</span>
                 </div>
-            ` : ''}
+                <div class="suggestion-empty">
+                    <p>${conv.needs_response ? '💬 Guest is waiting for a response' : '📚 Compare AI vs actual response'}</p>
+                    <button class="btn btn-primary" onclick="generateSuggestion(${conv.id}, ${!conv.needs_response})">
+                        🤖 ${conv.needs_response ? 'Generate AI Suggestion' : 'See What AI Would Say'}
+                    </button>
+                </div>
+            </div>
         `;
         
         // Auto-scroll to bottom of messages
@@ -395,13 +365,13 @@ async function selectConversation(id) {
     }
 }
 
-async function generateSuggestion(conversationId) {
+async function generateSuggestion(conversationId, forLearning = false) {
     const panel = document.querySelector('.suggestion-panel');
     if (panel) {
         panel.innerHTML = `
             <div class="suggestion-header">
                 <span class="suggestion-icon">🤖</span>
-                <span class="suggestion-title">AI Suggested Response</span>
+                <span class="suggestion-title">${forLearning ? 'AI Learning Mode' : 'AI Suggested Response'}</span>
             </div>
             <div class="suggestion-loading">
                 <div class="spinner"></div>
@@ -411,19 +381,40 @@ async function generateSuggestion(conversationId) {
     }
     
     try {
-        const result = await apiPost(`/conversations/${conversationId}/generate-suggestion`);
+        const url = forLearning 
+            ? `/conversations/${conversationId}/generate-suggestion?for_learning=true`
+            : `/conversations/${conversationId}/generate-suggestion`;
+        const result = await apiPost(url);
         
         if (result.suggested_reply) {
             const sr = result.suggested_reply;
+            const isLearning = result.for_learning || forLearning;
+            const actualReply = result.actual_host_reply;
+            
             panel.innerHTML = `
                 <div class="suggestion-header">
                     <span class="suggestion-icon">🤖</span>
-                    <span class="suggestion-title">AI Suggested Response</span>
+                    <span class="suggestion-title">${isLearning ? 'AI Learning Comparison' : 'AI Suggested Response'}</span>
                     <span class="suggestion-confidence ${getConfidenceClass(sr.confidence)}">
                         ${(sr.confidence * 100).toFixed(0)}% confident
                     </span>
                 </div>
-                <div class="suggestion-text">${escapeHtml(sr.text)}</div>
+                
+                ${isLearning && actualReply ? `
+                    <div class="learning-comparison">
+                        <div class="comparison-section ai-section">
+                            <div class="comparison-label">🤖 AI Would Have Said:</div>
+                            <div class="comparison-text">${escapeHtml(sr.text)}</div>
+                        </div>
+                        <div class="comparison-section host-section">
+                            <div class="comparison-label">👤 Host Actually Said:</div>
+                            <div class="comparison-text">${escapeHtml(actualReply)}</div>
+                        </div>
+                    </div>
+                ` : `
+                    <div class="suggestion-text">${escapeHtml(sr.text)}</div>
+                `}
+                
                 ${sr.reasoning ? `
                     <div class="suggestion-reasoning">
                         <strong>Reasoning:</strong> ${escapeHtml(sr.reasoning)}
@@ -432,17 +423,26 @@ async function generateSuggestion(conversationId) {
                 ${sr.needs_human_review ? `
                     <div class="suggestion-warning">⚠️ Needs human review before sending</div>
                 ` : ''}
-                <div class="suggestion-actions">
-                    <button class="btn btn-primary" onclick="sendSuggestion(${conversationId}, '${escapeForJs(sr.text)}')">
-                        ✅ Send This Response
-                    </button>
-                    <button class="btn btn-secondary" onclick="editSuggestion(${conversationId}, '${escapeForJs(sr.text)}')">
-                        ✏️ Edit First
-                    </button>
-                    <button class="btn btn-ghost" onclick="generateSuggestion(${conversationId})">
-                        🔄 Regenerate
-                    </button>
-                </div>
+                
+                ${!isLearning ? `
+                    <div class="suggestion-actions">
+                        <button class="btn btn-primary" onclick="sendSuggestion(${conversationId}, '${escapeForJs(sr.text)}')">
+                            ✅ Send This Response
+                        </button>
+                        <button class="btn btn-secondary" onclick="editSuggestion(${conversationId}, '${escapeForJs(sr.text)}')">
+                            ✏️ Edit First
+                        </button>
+                        <button class="btn btn-ghost" onclick="generateSuggestion(${conversationId})">
+                            🔄 Regenerate
+                        </button>
+                    </div>
+                ` : `
+                    <div class="suggestion-actions">
+                        <button class="btn btn-ghost" onclick="generateSuggestion(${conversationId}, true)">
+                            🔄 Regenerate Comparison
+                        </button>
+                    </div>
+                `}
             `;
         } else {
             panel.innerHTML = `
@@ -452,7 +452,7 @@ async function generateSuggestion(conversationId) {
                 </div>
                 <div class="suggestion-error">
                     <p>${result.error || 'Unable to generate suggestion'}</p>
-                    <button class="btn btn-ghost" onclick="generateSuggestion(${conversationId})">
+                    <button class="btn btn-ghost" onclick="generateSuggestion(${conversationId}, ${forLearning})">
                         🔄 Try Again
                     </button>
                 </div>

@@ -293,8 +293,19 @@ async def resolve_conversation(conversation_id: int, db: Session = Depends(get_d
 
 
 @router.post("/conversations/{conversation_id}/generate-suggestion")
-async def generate_suggestion(conversation_id: int, db: Session = Depends(get_db)):
-    """Generate an AI suggestion for a conversation on-demand."""
+async def generate_suggestion(
+    conversation_id: int, 
+    for_learning: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate an AI suggestion for a conversation on-demand.
+    
+    Args:
+        conversation_id: The conversation to generate for
+        for_learning: If True, generates suggestion for last guest message even if host has replied
+                     This allows comparing AI suggestions to actual host responses
+    """
     from brain import generate_ai_response, get_style_examples
     from models import GuestIndex
     
@@ -302,16 +313,15 @@ async def generate_suggestion(conversation_id: int, db: Session = Depends(get_db
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     
-    messages = db.query(Message).filter(
+    all_messages = db.query(Message).filter(
         Message.conversation_id == conversation_id
     ).order_by(Message.sent_at).all()
     
-    if not messages:
+    if not all_messages:
         return {"error": "No messages in conversation"}
     
     try:
         # Build guest context directly from conversation data (not the cache!)
-        # This ensures we have the correct property/dates for THIS conversation
         guest_context = GuestIndex(
             guest_phone=conv.guest_phone or "unknown",
             guest_name=conv.guest_name,
@@ -321,21 +331,46 @@ async def generate_suggestion(conversation_id: int, db: Session = Depends(get_db
             source=conv.booking_source or "unknown"
         )
         
+        # For learning mode: find the last guest message and generate what AI would have said
+        # This allows comparing AI suggestion to actual host response
+        actual_host_reply = None
+        messages_for_ai = all_messages
+        
+        if for_learning or (all_messages[-1].direction and all_messages[-1].direction.value == "outbound"):
+            # Find the last guest message
+            last_guest_idx = None
+            for i in range(len(all_messages) - 1, -1, -1):
+                if all_messages[i].direction and all_messages[i].direction.value == "inbound":
+                    last_guest_idx = i
+                    break
+            
+            if last_guest_idx is not None:
+                # Only include messages up to and including the last guest message
+                messages_for_ai = all_messages[:last_guest_idx + 1]
+                
+                # Capture the actual host reply (if any) for comparison
+                if last_guest_idx < len(all_messages) - 1:
+                    next_msg = all_messages[last_guest_idx + 1]
+                    if next_msg.direction and next_msg.direction.value == "outbound":
+                        actual_host_reply = next_msg.content
+        
+        if not messages_for_ai:
+            return {"error": "No guest messages found"}
+        
         # Get style examples based on last guest message
-        last_msg = messages[-1]
-        last_guest_msg = last_msg.content if last_msg else ""
+        last_guest_msg = messages_for_ai[-1].content if messages_for_ai else ""
         style_examples = get_style_examples(last_guest_msg, n=3)
         
         # Generate suggestion
         ai_response = await generate_ai_response(
-            messages=messages,
+            messages=messages_for_ai,
             guest_context=guest_context,
             style_examples=style_examples,
             conversation_id=conversation_id,
             use_advanced=False  # Use simple mode for quick suggestions
         )
         
-        return {
+        result = {
             "suggested_reply": {
                 "text": ai_response.reply_text,
                 "confidence": ai_response.confidence_score,
@@ -343,6 +378,14 @@ async def generate_suggestion(conversation_id: int, db: Session = Depends(get_db
                 "needs_human_review": ai_response.requires_human
             }
         }
+        
+        # Include actual host reply for learning/comparison
+        if actual_host_reply:
+            result["actual_host_reply"] = actual_host_reply
+            result["for_learning"] = True
+        
+        return result
+        
     except Exception as e:
         import traceback
         traceback.print_exc()
