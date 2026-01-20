@@ -694,31 +694,21 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     
     listing_ids = [p["listing_id"] for p in monitored]
     
-    # Get CONFIRMED reservations from GuestIndex (only confirmed, not inquiries)
-    # GuestIndex is synced from Hostify reservations API with status filtering
+    # Get checked-in guests from HostifyThread table
+    # HostifyThread uses listing_ids from the inbox API (matches our monitored properties)
+    # A guest is checked in if: checkin <= now AND checkout >= today
+    # We also filter for threads WITH a reservation_id (confirmed bookings, not inquiries)
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    confirmed_guests = db.query(GuestIndex).filter(
-        GuestIndex.listing_id.in_(listing_ids),
-        GuestIndex.check_in_date <= now,
-        GuestIndex.check_out_date >= today
+    threads = db.query(HostifyThread).filter(
+        HostifyThread.listing_id.in_(listing_ids),
+        HostifyThread.checkin <= now,
+        HostifyThread.checkout >= today,
+        HostifyThread.reservation_id.isnot(None)  # Only confirmed reservations
     ).all()
     
-    print(f"[GuestHealth] Found {len(confirmed_guests)} confirmed reservations at {len(monitored)} monitored properties")
-    
-    # Now find matching threads for these confirmed reservations
-    # Match by reservation_id to get the inbox thread with messages
-    reservation_ids = [g.reservation_id for g in confirmed_guests if g.reservation_id]
-    
-    threads = db.query(HostifyThread).filter(
-        HostifyThread.reservation_id.in_(reservation_ids)
-    ).all() if reservation_ids else []
-    
-    # Create a map of reservation_id -> guest info for enrichment
-    guest_info_map = {g.reservation_id: g for g in confirmed_guests}
-    
-    print(f"[GuestHealth] Found {len(threads)} threads with messages for confirmed guests")
+    print(f"[GuestHealth] Found {len(threads)} checked-in threads at {len(monitored)} monitored properties", flush=True)
     
     analyzed = 0
     errors = 0
