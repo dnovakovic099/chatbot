@@ -827,26 +827,33 @@ conversation_summarizer = ConversationSummarizer()
 
 async def initialize_knowledge_system():
     """Initialize the knowledge system on startup."""
-    print("[Knowledge] Initializing knowledge system...")
+    print("[Knowledge] Initializing knowledge system...", flush=True)
     
     # Index style examples
+    print("[Knowledge] Importing embeddings module...", flush=True)
     from embeddings import initialize_style_examples
+    print("[Knowledge] Calling initialize_style_examples...", flush=True)
     initialize_style_examples()
+    print("[Knowledge] Style examples initialized", flush=True)
     
     # Load any existing property knowledge
+    print("[Knowledge] Loading property knowledge...", flush=True)
     db = SessionLocal()
     try:
         # Get all unique property IDs
         properties = db.query(GuestIndex.listing_id, GuestIndex.listing_name).distinct().all()
+        print(f"[Knowledge] Found {len(properties)} properties", flush=True)
         
         for prop_id, prop_name in properties:
             if prop_id:
                 count = knowledge_manager.load_and_index_property(prop_id, prop_name or "")
                 if count > 0:
-                    print(f"[Knowledge] Indexed {count} docs for property {prop_id}")
+                    print(f"[Knowledge] Indexed {count} docs for property {prop_id}", flush=True)
     finally:
         db.close()
     
     # Print stats
+    print("[Knowledge] Getting collection stats...", flush=True)
     stats = get_collection_stats()
-    print(f"[Knowledge] Vector DB stats: {stats}")
+    print(f"[Knowledge] Vector DB stats: {stats}", flush=True)
+    print("[Knowledge] ✅ Knowledge system ready!", flush=True)
