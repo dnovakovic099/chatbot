@@ -706,13 +706,26 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     
     print(f"[GuestHealth] Found {len(all_threads)} checked-in threads at monitored properties", flush=True)
     
-    # Get confirmed reservation IDs from GuestIndex
-    # GuestIndex is synced from reservations API with status filter (only confirmed)
+    # Get CONFIRMED reservation IDs from GuestIndex
+    # Only include statuses that mean the guest is actually staying
+    confirmed_statuses = {'confirmed', 'accepted', 'checked_in'}
+    
     confirmed_reservation_ids = set(
         r[0] for r in db.query(GuestIndex.reservation_id).filter(
-            GuestIndex.reservation_id.isnot(None)
+            GuestIndex.reservation_id.isnot(None),
+            GuestIndex.status.in_(confirmed_statuses)
         ).all()
     )
+    
+    # Also include reservations with no status (legacy data) - assume confirmed
+    legacy_reservation_ids = set(
+        r[0] for r in db.query(GuestIndex.reservation_id).filter(
+            GuestIndex.reservation_id.isnot(None),
+            GuestIndex.status.is_(None)
+        ).all()
+    )
+    
+    confirmed_reservation_ids = confirmed_reservation_ids.union(legacy_reservation_ids)
     
     print(f"[GuestHealth] Have {len(confirmed_reservation_ids)} confirmed reservation IDs in GuestIndex", flush=True)
     
@@ -1562,13 +1575,25 @@ async def refresh_inquiry_analysis(db: Session, days_back: int = 30, limit: int 
     now = datetime.utcnow()
     cutoff_date = now - timedelta(days=days_back)
     
-    # Get ALL confirmed reservation IDs from GuestIndex
-    # Don't filter by listing_id since they don't match between APIs
+    # Get CONFIRMED reservation IDs from GuestIndex
+    # Only statuses that mean the guest is actually staying
+    confirmed_statuses = {'confirmed', 'accepted', 'checked_in'}
+    
     confirmed_reservation_ids = set(
         r[0] for r in db.query(GuestIndex.reservation_id).filter(
-            GuestIndex.reservation_id.isnot(None)
+            GuestIndex.reservation_id.isnot(None),
+            GuestIndex.status.in_(confirmed_statuses)
         ).all()
     )
+    
+    # Also include legacy data with no status
+    legacy_ids = set(
+        r[0] for r in db.query(GuestIndex.reservation_id).filter(
+            GuestIndex.reservation_id.isnot(None),
+            GuestIndex.status.is_(None)
+        ).all()
+    )
+    confirmed_reservation_ids = confirmed_reservation_ids.union(legacy_ids)
     
     print(f"[InquiryAnalysis] Have {len(confirmed_reservation_ids)} confirmed reservation IDs", flush=True)
     

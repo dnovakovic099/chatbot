@@ -143,6 +143,9 @@ class GuestIndex(Base):
     # Hostify inbox for messaging
     inbox_id = Column(Integer, nullable=True)
     
+    # Reservation status from Hostify (confirmed, accepted, checked_in, pending, inquiry, etc.)
+    status = Column(String(50), nullable=True)
+    
     # Booking source (Airbnb, VRBO, Direct, etc.)
     source = Column(String(50), nullable=True)
     

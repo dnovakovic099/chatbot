@@ -1045,6 +1045,7 @@ def _extract_guest_data_all(reservation: dict, listing: dict = None) -> Optional
             "inbox_id": reservation.get("message_id"),  # Hostify calls it message_id
             "source": reservation.get("source"),
             "is_phone_verified": is_phone_verified,
+            "status": reservation.get("status", "").lower(),  # confirmed, accepted, checked_in, pending, inquiry, etc.
         }
     except Exception as e:
         log_event("cache_extraction_error", payload={
