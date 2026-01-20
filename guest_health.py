@@ -701,35 +701,35 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Query threads - a guest is checked in if: checkin <= now AND checkout >= today
-    # Having checkin/checkout dates indicates an actual booking (not just an inquiry)
-    threads = db.query(HostifyThread).filter(
-        HostifyThread.listing_id.in_(listing_ids),
-        HostifyThread.checkin.isnot(None),
-        HostifyThread.checkin <= now,
-        HostifyThread.checkout >= today
+    # Query conversations - a guest is checked in if: check_in_date <= now AND check_out_date >= today
+    # Note: Using Conversation table which is populated by sync_messages
+    conversations = db.query(Conversation).filter(
+        Conversation.listing_id.in_(listing_ids),
+        Conversation.check_in_date.isnot(None),
+        Conversation.check_in_date <= now,
+        Conversation.check_out_date >= today
     ).all()
     
-    print(f"[GuestHealth] Found {len(threads)} checked-in threads at {len(monitored)} monitored properties", flush=True)
-    print(f"[GuestHealth] Monitored listing_ids: {listing_ids[:5]}...", flush=True)
+    print(f"[GuestHealth] Found {len(conversations)} checked-in conversations at {len(monitored)} monitored properties", flush=True)
+    print(f"[GuestHealth] Monitored listing_ids sample: {listing_ids[:3]}...", flush=True)
     
     analyzed = 0
     errors = 0
     
-    for i, thread in enumerate(threads):
-        print(f"[GuestHealth] [{i+1}/{len(threads)}] Analyzing {thread.guest_name}...")
-        result = await analyze_hostify_thread(db, thread)
+    for i, conv in enumerate(conversations):
+        print(f"[GuestHealth] [{i+1}/{len(conversations)}] Analyzing {conv.guest_name}...", flush=True)
+        result = await analyze_conversation(db, conv)
         if result:
             analyzed += 1
         else:
             errors += 1
-        # Small delay to be nice to Hostify API
+        # Small delay to be nice to OpenAI API
         await asyncio.sleep(0.2)
     
     return {
         "status": "complete",
         "properties_monitored": len(monitored),
-        "guests_found": len(threads),
+        "guests_found": len(conversations),
         "guests_analyzed": analyzed,
         "errors": errors
     }
