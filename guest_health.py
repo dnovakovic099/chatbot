@@ -729,11 +729,42 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     
     print(f"[GuestHealth] Have {len(confirmed_reservation_ids)} confirmed reservation IDs in GuestIndex", flush=True)
     
-    # Filter to only CONFIRMED threads (reservation_id exists in GuestIndex)
-    confirmed_threads = [
-        t for t in all_threads 
-        if t.reservation_id and t.reservation_id in confirmed_reservation_ids
-    ]
+    # Build fallback lookup by (guest_name, check_in_date) for listing_id mismatch cases
+    # This handles when the same reservation has different listing_ids in different APIs
+    confirmed_by_name_date = set()
+    confirmed_guests = db.query(GuestIndex.guest_name, GuestIndex.check_in_date, GuestIndex.status).filter(
+        GuestIndex.guest_name.isnot(None),
+        GuestIndex.check_in_date.isnot(None)
+    ).all()
+    
+    for name, checkin, status in confirmed_guests:
+        # Only include confirmed statuses or legacy (null status)
+        if status in confirmed_statuses or status is None:
+            # Normalize: lowercase name, date only (no time)
+            name_key = name.strip().lower() if name else ""
+            date_key = checkin.date() if checkin else None
+            if name_key and date_key:
+                confirmed_by_name_date.add((name_key, date_key))
+    
+    print(f"[GuestHealth] Have {len(confirmed_by_name_date)} confirmed (name, date) pairs for fallback matching", flush=True)
+    
+    # Filter to only CONFIRMED threads
+    # Primary: reservation_id exists in GuestIndex
+    # Fallback: (guest_name, check_in_date) matches a confirmed reservation
+    confirmed_threads = []
+    for t in all_threads:
+        # Primary match by reservation_id
+        if t.reservation_id and t.reservation_id in confirmed_reservation_ids:
+            confirmed_threads.append(t)
+            continue
+        
+        # Fallback match by guest_name + check_in_date
+        if t.guest_name and t.checkin:
+            name_key = t.guest_name.strip().lower()
+            date_key = t.checkin.date()
+            if (name_key, date_key) in confirmed_by_name_date:
+                confirmed_threads.append(t)
+                print(f"[GuestHealth] Matched {t.guest_name} by name+date fallback", flush=True)
     
     print(f"[GuestHealth] {len(confirmed_threads)} are CONFIRMED reservations (will analyze)", flush=True)
     print(f"[GuestHealth] {len(all_threads) - len(confirmed_threads)} are inquiries (skipped)", flush=True)
@@ -1605,11 +1636,40 @@ async def refresh_inquiry_analysis(db: Session, days_back: int = 30, limit: int 
     
     print(f"[InquiryAnalysis] Found {len(all_threads)} total threads at monitored properties", flush=True)
     
-    # Filter to only INQUIRIES (reservation_id NOT in GuestIndex)
-    inquiry_threads = [
-        t for t in all_threads
-        if not t.reservation_id or t.reservation_id not in confirmed_reservation_ids
-    ][:limit]
+    # Build fallback lookup by (guest_name, check_in_date) for listing_id mismatch cases
+    confirmed_by_name_date = set()
+    confirmed_guests = db.query(GuestIndex.guest_name, GuestIndex.check_in_date, GuestIndex.status).filter(
+        GuestIndex.guest_name.isnot(None),
+        GuestIndex.check_in_date.isnot(None)
+    ).all()
+    
+    for name, checkin, status in confirmed_guests:
+        if status in confirmed_statuses or status is None:
+            name_key = name.strip().lower() if name else ""
+            date_key = checkin.date() if checkin else None
+            if name_key and date_key:
+                confirmed_by_name_date.add((name_key, date_key))
+    
+    # Filter to only INQUIRIES (NOT confirmed by reservation_id OR name+date)
+    inquiry_threads = []
+    for t in all_threads:
+        is_confirmed = False
+        
+        # Check by reservation_id
+        if t.reservation_id and t.reservation_id in confirmed_reservation_ids:
+            is_confirmed = True
+        
+        # Check by name + date fallback
+        if not is_confirmed and t.guest_name and t.checkin:
+            name_key = t.guest_name.strip().lower()
+            date_key = t.checkin.date()
+            if (name_key, date_key) in confirmed_by_name_date:
+                is_confirmed = True
+        
+        if not is_confirmed:
+            inquiry_threads.append(t)
+    
+    inquiry_threads = inquiry_threads[:limit]
     
     print(f"[InquiryAnalysis] {len(inquiry_threads)} are inquiries (not confirmed)", flush=True)
     
