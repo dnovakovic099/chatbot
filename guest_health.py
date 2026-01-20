@@ -666,18 +666,31 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     
     listing_ids = [p["listing_id"] for p in monitored]
     
-    # Get checked-in guests from HostifyThread table
-    # A guest is checked in if: checkin <= now AND checkout >= today
+    # Get CONFIRMED reservations from GuestIndex (only confirmed, not inquiries)
+    # GuestIndex is synced from Hostify reservations API with status filtering
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    threads = db.query(HostifyThread).filter(
-        HostifyThread.listing_id.in_(listing_ids),
-        HostifyThread.checkin <= now,
-        HostifyThread.checkout >= today
+    confirmed_guests = db.query(GuestIndex).filter(
+        GuestIndex.listing_id.in_(listing_ids),
+        GuestIndex.check_in_date <= now,
+        GuestIndex.check_out_date >= today
     ).all()
     
-    print(f"[GuestHealth] Found {len(threads)} checked-in threads at {len(monitored)} monitored properties")
+    print(f"[GuestHealth] Found {len(confirmed_guests)} confirmed reservations at {len(monitored)} monitored properties")
+    
+    # Now find matching threads for these confirmed reservations
+    # Match by reservation_id to get the inbox thread with messages
+    reservation_ids = [g.reservation_id for g in confirmed_guests if g.reservation_id]
+    
+    threads = db.query(HostifyThread).filter(
+        HostifyThread.reservation_id.in_(reservation_ids)
+    ).all() if reservation_ids else []
+    
+    # Create a map of reservation_id -> guest info for enrichment
+    guest_info_map = {g.reservation_id: g for g in confirmed_guests}
+    
+    print(f"[GuestHealth] Found {len(threads)} threads with messages for confirmed guests")
     
     analyzed = 0
     errors = 0
@@ -1099,15 +1112,42 @@ def get_guest_health_summary(db: Session) -> List[Dict[str, Any]]:
         GuestHealthAnalysis.check_out_date >= today
     ).all()
     
+    # Build a mapping of listing_id -> listing_name from GuestHealthSettings and HostifyThread tables
+    # for cases where listing_name is not stored in the analysis
+    listing_ids = list(set(a.listing_id for a in analyses if a.listing_id))
+    listing_name_map = {}
+    if listing_ids:
+        # First try GuestHealthSettings (most reliable source for property names)
+        settings_with_names = db.query(GuestHealthSettings.listing_id, GuestHealthSettings.listing_name).filter(
+            GuestHealthSettings.listing_id.in_(listing_ids),
+            GuestHealthSettings.listing_name.isnot(None)
+        ).all()
+        for lid, lname in settings_with_names:
+            if lid and lname:
+                listing_name_map[lid] = lname
+        
+        # Fall back to HostifyThread for any missing
+        missing_ids = [lid for lid in listing_ids if lid not in listing_name_map]
+        if missing_ids:
+            threads_with_names = db.query(HostifyThread.listing_id, HostifyThread.listing_name).filter(
+                HostifyThread.listing_id.in_(missing_ids),
+                HostifyThread.listing_name.isnot(None)
+            ).distinct().all()
+            for lid, lname in threads_with_names:
+                if lid and lname:
+                    listing_name_map[lid] = lname
+    
     result = []
     for a in analyses:
+        # Use stored listing_name, or look it up from the map
+        listing_name = a.listing_name or listing_name_map.get(a.listing_id)
         result.append({
             "id": a.id,
             "reservation_id": a.reservation_id,
             "guest_name": a.guest_name,
             "guest_phone": a.guest_phone,
             "listing_id": a.listing_id,
-            "listing_name": a.listing_name,
+            "listing_name": listing_name,
             "check_in_date": a.check_in_date.isoformat() if a.check_in_date else None,
             "check_out_date": a.check_out_date.isoformat() if a.check_out_date else None,
             "nights_stayed": a.nights_stayed,
