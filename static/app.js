@@ -76,6 +76,9 @@ function refreshView(viewName) {
         case 'health-settings':
             loadHealthSettings();
             break;
+        case 'inquiry-analysis':
+            loadInquiryAnalysis();
+            break;
     }
 }
 
@@ -1882,3 +1885,351 @@ async function saveHealthSettings() {
         alert('Failed to save settings: ' + error.message);
     }
 }
+
+
+// ============ INQUIRY ANALYSIS ============
+
+let inquiriesData = [];
+
+async function loadInquiryAnalysis() {
+    try {
+        // Load summary and inquiries in parallel
+        const [summaryData, inquiriesResult] = await Promise.all([
+            apiGet('/inquiries/summary'),
+            apiGet('/inquiries?limit=100')
+        ]);
+        
+        inquiriesData = inquiriesResult.inquiries || [];
+        
+        renderInquirySummary(summaryData);
+        renderInquiryList(inquiriesData);
+    } catch (error) {
+        console.error('Error loading inquiry analysis:', error);
+        document.getElementById('inquiry-list-container').innerHTML = 
+            '<div class="error-message">Failed to load inquiry data. Click "Analyze Inquiries" to start analysis.</div>';
+    }
+}
+
+function renderInquirySummary(summary) {
+    // Stats
+    document.getElementById('stat-total-inquiries').textContent = summary.total_inquiries || 0;
+    document.getElementById('stat-lost-revenue').textContent = formatCurrency(summary.total_lost_revenue || 0);
+    document.getElementById('stat-avg-response').textContent = formatResponseTime(summary.avg_response_time_minutes || 0);
+    document.getElementById('stat-avg-conversion').textContent = 
+        Math.round((summary.avg_conversion_likelihood || 0) * 100) + '%';
+    
+    // Common mistakes
+    const mistakesList = document.getElementById('common-mistakes-list');
+    if (summary.common_mistakes && summary.common_mistakes.length > 0) {
+        mistakesList.innerHTML = summary.common_mistakes.slice(0, 5).map(m => 
+            `<li><span class="mistake-text">${escapeHtml(m.mistake)}</span><span class="count">${m.count}</span></li>`
+        ).join('');
+    } else {
+        mistakesList.innerHTML = '<li class="empty">No data yet</li>';
+    }
+    
+    // Training needs
+    const trainingList = document.getElementById('training-needs-list');
+    if (summary.top_training_needs && summary.top_training_needs.length > 0) {
+        trainingList.innerHTML = summary.top_training_needs.slice(0, 5).map(t => 
+            `<li><span class="training-text">${escapeHtml(t.topic)}</span><span class="count">${t.count}</span></li>`
+        ).join('');
+    } else {
+        trainingList.innerHTML = '<li class="empty">No data yet</li>';
+    }
+    
+    // Outcome breakdown
+    const outcomeDiv = document.getElementById('outcome-breakdown');
+    const outcomes = summary.outcomes || {};
+    const outcomeLabels = {
+        'booked_elsewhere': '📍 Booked Elsewhere',
+        'price_objection': '💰 Price Objection',
+        'dates_unavailable': '📅 Dates Unavailable',
+        'slow_response': '⏰ Slow Response',
+        'poor_communication': '💬 Poor Communication',
+        'ghost': '👻 Guest Ghosted',
+        'no_response': '❌ No Team Response',
+        'requirements_not_met': '❓ Requirements Not Met',
+        'still_deciding': '🤔 Still Deciding',
+        'unknown': '❓ Unknown'
+    };
+    
+    const sortedOutcomes = Object.entries(outcomes)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6);
+    
+    if (sortedOutcomes.length > 0) {
+        outcomeDiv.innerHTML = sortedOutcomes.map(([outcome, count]) => 
+            `<div class="outcome-item">
+                <span class="outcome-label">${outcomeLabels[outcome] || outcome}</span>
+                <span class="outcome-count">${count}</span>
+            </div>`
+        ).join('');
+    } else {
+        outcomeDiv.innerHTML = '<div class="empty">No data yet</div>';
+    }
+}
+
+function renderInquiryList(inquiries) {
+    const container = document.getElementById('inquiry-list-container');
+    
+    if (!inquiries || inquiries.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">📉</div>
+                <h3>No Inquiries Analyzed</h3>
+                <p>Click "Analyze Inquiries" to analyze recent inquiries that didn't convert to bookings.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = inquiries.map(inquiry => renderInquiryCard(inquiry)).join('');
+}
+
+function renderInquiryCard(inquiry) {
+    const responseTimeClass = inquiry.first_response_minutes > 60 ? 'bad' : 
+                              inquiry.first_response_minutes > 30 ? '' : 'good';
+    
+    const conversionClass = inquiry.conversion_likelihood > 0.7 ? 'bad' : 
+                            inquiry.conversion_likelihood > 0.4 ? '' : 'good';
+    
+    const mistakes = inquiry.team_mistakes || [];
+    const mistakeTags = mistakes.slice(0, 3).map(m => 
+        `<span class="mistake-tag severity-${m.severity}">${escapeHtml(m.mistake)}</span>`
+    ).join('');
+    
+    const dates = [];
+    if (inquiry.requested_checkin) {
+        const checkin = new Date(inquiry.requested_checkin);
+        const checkout = inquiry.requested_checkout ? new Date(inquiry.requested_checkout) : null;
+        dates.push(`${checkin.toLocaleDateString()}`);
+        if (checkout) {
+            const nights = Math.round((checkout - checkin) / (1000 * 60 * 60 * 24));
+            dates.push(`→ ${checkout.toLocaleDateString()} (${nights} nights)`);
+        }
+    }
+    
+    return `
+        <div class="inquiry-card" onclick="showInquiryDetail(${inquiry.thread_id})">
+            <div class="inquiry-card-header">
+                <div>
+                    <h3>${escapeHtml(inquiry.guest_name || 'Unknown Guest')}</h3>
+                    <div class="inquiry-card-property">${escapeHtml(inquiry.listing_name || 'Unknown Property')}</div>
+                </div>
+                <span class="inquiry-outcome outcome-${inquiry.outcome}">${formatOutcome(inquiry.outcome)}</span>
+            </div>
+            
+            ${dates.length > 0 ? `<div class="inquiry-card-dates">📅 ${dates.join(' ')}</div>` : ''}
+            
+            <div class="inquiry-card-metrics">
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Response Time:</span>
+                    <span class="inquiry-metric-value ${responseTimeClass}">${formatResponseTime(inquiry.first_response_minutes)}</span>
+                </div>
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Messages:</span>
+                    <span class="inquiry-metric-value">${inquiry.total_messages || 0}</span>
+                </div>
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Could Have Converted:</span>
+                    <span class="inquiry-metric-value ${conversionClass}">${Math.round((inquiry.conversion_likelihood || 0) * 100)}%</span>
+                </div>
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Est. Lost Revenue:</span>
+                    <span class="inquiry-metric-value bad">${formatCurrency(inquiry.lost_revenue_estimate || 0)}</span>
+                </div>
+            </div>
+            
+            <div class="inquiry-card-reasoning">
+                ${escapeHtml(inquiry.outcome_reasoning || 'No analysis available')}
+            </div>
+            
+            ${mistakes.length > 0 ? `<div class="inquiry-card-mistakes">${mistakeTags}</div>` : ''}
+        </div>
+    `;
+}
+
+function formatOutcome(outcome) {
+    const labels = {
+        'booked_elsewhere': 'Booked Elsewhere',
+        'price_objection': 'Price Objection',
+        'dates_unavailable': 'Dates Unavailable',
+        'slow_response': 'Slow Response',
+        'poor_communication': 'Poor Communication',
+        'ghost': 'Ghosted',
+        'no_response': 'No Response',
+        'requirements_not_met': 'Requirements Not Met',
+        'still_deciding': 'Still Deciding',
+        'unknown': 'Unknown'
+    };
+    return labels[outcome] || outcome;
+}
+
+function formatResponseTime(minutes) {
+    if (!minutes && minutes !== 0) return 'N/A';
+    if (minutes < 60) return `${Math.round(minutes)}m`;
+    const hours = Math.floor(minutes / 60);
+    const mins = Math.round(minutes % 60);
+    if (hours < 24) return `${hours}h ${mins}m`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+}
+
+function formatCurrency(amount) {
+    if (!amount) return '$0';
+    return '$' + Math.round(amount).toLocaleString();
+}
+
+async function showInquiryDetail(threadId) {
+    try {
+        const data = await apiGet(`/inquiries/${threadId}`);
+        renderInquiryDetail(data);
+        document.getElementById('inquiry-detail-modal').classList.add('active');
+    } catch (error) {
+        console.error('Error loading inquiry detail:', error);
+        alert('Failed to load inquiry details');
+    }
+}
+
+function renderInquiryDetail(data) {
+    const analysis = data.analysis;
+    const messages = data.messages || [];
+    
+    const content = document.getElementById('inquiry-detail-content');
+    
+    content.innerHTML = `
+        <div class="inquiry-detail-header">
+            <div>
+                <h2>${escapeHtml(analysis.guest_name || 'Unknown Guest')}</h2>
+                <div class="inquiry-detail-property">${escapeHtml(analysis.listing_name || 'Unknown Property')}</div>
+            </div>
+            <button class="inquiry-detail-close" onclick="closeInquiryDetail()">×</button>
+        </div>
+        
+        <div class="inquiry-detail-section">
+            <h3>📊 Analysis Summary</h3>
+            <div class="inquiry-card-metrics" style="margin-bottom: 12px;">
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Outcome:</span>
+                    <span class="inquiry-outcome outcome-${analysis.outcome}">${formatOutcome(analysis.outcome)}</span>
+                </div>
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Response Time:</span>
+                    <span class="inquiry-metric-value">${formatResponseTime(analysis.first_response_minutes)}</span>
+                </div>
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Quality Score:</span>
+                    <span class="inquiry-metric-value">${Math.round((analysis.response_quality_score || 0) * 100)}%</span>
+                </div>
+                <div class="inquiry-metric">
+                    <span class="inquiry-metric-label">Est. Lost:</span>
+                    <span class="inquiry-metric-value bad">${formatCurrency(analysis.lost_revenue_estimate)}</span>
+                </div>
+            </div>
+            <div class="inquiry-card-reasoning">
+                ${escapeHtml(analysis.outcome_reasoning || 'No analysis')}
+            </div>
+        </div>
+        
+        ${analysis.team_mistakes && analysis.team_mistakes.length > 0 ? `
+        <div class="inquiry-detail-section">
+            <h3>🚨 Team Mistakes</h3>
+            <div class="recommendations-list">
+                ${analysis.team_mistakes.map(m => `
+                    <div class="recommendation-item">
+                        <span class="recommendation-priority ${m.severity}">${m.severity}</span>
+                        <div class="recommendation-content">
+                            <div class="recommendation-action">${escapeHtml(m.mistake)}</div>
+                            <div class="recommendation-impact">${escapeHtml(m.impact)}</div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+        ` : ''}
+        
+        ${analysis.team_strengths && analysis.team_strengths.length > 0 ? `
+        <div class="inquiry-detail-section">
+            <h3>✅ What Went Well</h3>
+            <ul class="insight-list">
+                ${analysis.team_strengths.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+            </ul>
+        </div>
+        ` : ''}
+        
+        ${analysis.recommendations && analysis.recommendations.length > 0 ? `
+        <div class="inquiry-detail-section">
+            <h3>💡 Recommendations</h3>
+            <div class="recommendations-list">
+                ${analysis.recommendations.map(r => `
+                    <div class="recommendation-item">
+                        <span class="recommendation-priority ${r.priority}">${r.priority}</span>
+                        <div class="recommendation-content">
+                            <div class="recommendation-action">${escapeHtml(r.action)}</div>
+                            <div class="recommendation-impact">${escapeHtml(r.expected_impact)}</div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+        ` : ''}
+        
+        ${analysis.guest_questions && analysis.guest_questions.length > 0 ? `
+        <div class="inquiry-detail-section">
+            <h3>❓ Guest Questions</h3>
+            <ul class="insight-list">
+                ${analysis.guest_questions.map(q => `<li>${escapeHtml(q)}</li>`).join('')}
+            </ul>
+            ${analysis.unanswered_questions && analysis.unanswered_questions.length > 0 ? `
+                <h4 style="margin-top: 12px; color: var(--danger);">⚠️ Unanswered:</h4>
+                <ul class="insight-list">
+                    ${analysis.unanswered_questions.map(q => `<li style="color: var(--danger);">${escapeHtml(q)}</li>`).join('')}
+                </ul>
+            ` : ''}
+        </div>
+        ` : ''}
+        
+        <div class="inquiry-detail-section">
+            <h3>💬 Conversation (${messages.length} messages)</h3>
+            <div class="inquiry-messages">
+                ${messages.map(m => `
+                    <div class="inquiry-message ${m.direction}">
+                        <div class="inquiry-message-content">${escapeHtml(m.content || '')}</div>
+                        <div class="inquiry-message-time">${m.sent_at ? new Date(m.sent_at).toLocaleString() : ''}</div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function closeInquiryDetail() {
+    document.getElementById('inquiry-detail-modal').classList.remove('active');
+}
+
+async function refreshInquiries() {
+    const container = document.getElementById('inquiry-list-container');
+    container.innerHTML = '<div class="loading">Analyzing inquiries... This may take a few minutes.</div>';
+    
+    try {
+        const result = await apiPost('/inquiries/refresh?days_back=60&limit=30');
+        
+        alert(`✅ Analysis complete!\n\n${result.inquiries_found} inquiries found\n${result.inquiries_analyzed} analyzed\n${result.errors} errors`);
+        
+        // Reload the data
+        await loadInquiryAnalysis();
+    } catch (error) {
+        console.error('Error refreshing inquiries:', error);
+        alert('Failed to analyze inquiries: ' + error.message);
+        container.innerHTML = '<div class="error-message">Analysis failed. Please try again.</div>';
+    }
+}
+
+// Close modal on click outside
+document.addEventListener('click', (e) => {
+    const modal = document.getElementById('inquiry-detail-modal');
+    if (e.target === modal) {
+        closeInquiryDetail();
+    }
+});

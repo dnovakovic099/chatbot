@@ -7,41 +7,81 @@ This is the main entry point for the application. It handles:
 - Startup initialization and scheduled jobs
 """
 
+import sys
+import os
+
+# Force unbuffered output for Railway logs
+sys.stdout.reconfigure(line_buffering=True)
+print("[STARTUP] Python starting...", flush=True)
+print(f"[STARTUP] Python version: {sys.version}", flush=True)
+print(f"[STARTUP] Working directory: {os.getcwd()}", flush=True)
+
+print("[STARTUP] Importing standard libraries...", flush=True)
 import json
 import hmac
 import hashlib
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+print("[STARTUP] Standard libraries OK", flush=True)
 
+print("[STARTUP] Importing FastAPI...", flush=True)
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+print("[STARTUP] FastAPI OK", flush=True)
 
+print("[STARTUP] Importing APScheduler...", flush=True)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+print("[STARTUP] APScheduler OK", flush=True)
 
+print("[STARTUP] Importing config...", flush=True)
 from config import settings
+print("[STARTUP] Config OK", flush=True)
+
+print("[STARTUP] Importing models...", flush=True)
 from models import (
     init_db, get_db, SessionLocal,
     Conversation, ConversationStatus, Message
 )
+print("[STARTUP] Models OK", flush=True)
+
+print("[STARTUP] Importing utils...", flush=True)
 from utils import (
     normalize_phone, log_event, get_or_create_conversation,
     save_message, message_already_processed, get_conversation,
     get_recent_messages, get_guest_from_cache, check_escalation_keywords,
     check_rate_limit, cache_draft, get_cached_draft
 )
+print("[STARTUP] Utils OK", flush=True)
+
+print("[STARTUP] Importing cache...", flush=True)
 from cache import sync_reservations, force_sync_reservations
+print("[STARTUP] Cache OK", flush=True)
+
+print("[STARTUP] Importing brain...", flush=True)
 from brain import generate_ai_response, get_style_examples
+print("[STARTUP] Brain OK", flush=True)
+
+print("[STARTUP] Importing escalation...", flush=True)
 from escalation import (
     set_scheduler, trigger_escalation_l1, handle_new_message_while_escalated,
     post_soft_escalation_to_slack, post_to_slack, cancel_escalation_timers,
     handle_approve_draft, handle_snooze, handle_mark_resolved, 
     handle_edit_submit, open_edit_modal, escalation_l1_timeout
 )
+print("[STARTUP] Escalation OK", flush=True)
+
+print("[STARTUP] Importing dispatch...", flush=True)
 from dispatch import send_reply
+print("[STARTUP] Dispatch OK", flush=True)
+
+print("[STARTUP] Importing admin router...", flush=True)
 from admin import router as admin_router
+print("[STARTUP] Admin router OK", flush=True)
+
+print("[STARTUP] All imports complete!", flush=True)
 
 
 # ============ SCHEDULER SETUP ============
@@ -61,27 +101,34 @@ pending_burst_jobs = {}  # {conversation_id: job_id}
 async def lifespan(app: FastAPI):
     """Application lifecycle manager."""
     # Startup
-    print("🚀 Starting AI Property Manager v4.0 (RAG + Agents)...")
+    print("[LIFESPAN] Starting AI Property Manager v4.0...", flush=True)
     
     # Initialize database
+    print("[LIFESPAN] Initializing database...", flush=True)
     init_db()
-    print("✅ Database initialized")
+    print("[LIFESPAN] ✅ Database initialized", flush=True)
     
     # Set scheduler reference in escalation module
+    print("[LIFESPAN] Setting scheduler reference...", flush=True)
     set_scheduler(scheduler)
     
     # Start scheduler
+    print("[LIFESPAN] Starting scheduler...", flush=True)
     scheduler.start()
-    print("✅ Scheduler started")
+    print("[LIFESPAN] ✅ Scheduler started", flush=True)
     
     # Initialize knowledge system (vector DB, embeddings)
+    print("[LIFESPAN] Initializing knowledge system...", flush=True)
     try:
         from knowledge import initialize_knowledge_system
+        print("[LIFESPAN] Knowledge module imported, calling initialize...", flush=True)
         await initialize_knowledge_system()
-        print("✅ Knowledge system initialized (RAG enabled)")
+        print("[LIFESPAN] ✅ Knowledge system initialized (RAG enabled)", flush=True)
     except Exception as e:
-        print(f"⚠️ Knowledge system initialization failed: {e}")
-        print("   Falling back to simple mode")
+        print(f"[LIFESPAN] ⚠️ Knowledge system initialization failed: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        print("[LIFESPAN] Falling back to simple mode", flush=True)
     
     # Schedule recurring jobs
     scheduler.add_job(

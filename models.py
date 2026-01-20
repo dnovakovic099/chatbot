@@ -153,6 +153,66 @@ class GuestIndex(Base):
         return f"<GuestIndex {self.reservation_id} - {self.guest_name}>"
 
 
+class InquiryAnalysis(Base):
+    """
+    AI analysis of inquiries that didn't convert to bookings.
+    Helps managers understand why guests didn't book and identify team mistakes.
+    """
+    __tablename__ = "inquiry_analysis"
+    
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(Integer, unique=True, index=True)  # Hostify thread ID
+    
+    # Guest info
+    guest_name = Column(String(255), nullable=True)
+    guest_email = Column(String(255), nullable=True)
+    
+    # Property info
+    listing_id = Column(String(100), index=True, nullable=True)
+    listing_name = Column(String(255), nullable=True)
+    
+    # Inquiry dates
+    inquiry_date = Column(DateTime, nullable=True)
+    requested_checkin = Column(DateTime, nullable=True)
+    requested_checkout = Column(DateTime, nullable=True)
+    
+    # Response metrics
+    first_response_minutes = Column(Integer, nullable=True)  # How fast team replied
+    total_messages = Column(Integer, default=0)
+    team_messages = Column(Integer, default=0)
+    guest_messages = Column(Integer, default=0)
+    conversation_duration_hours = Column(Float, nullable=True)  # How long convo lasted
+    
+    # AI Analysis
+    outcome = Column(String(50), nullable=True)  # "no_response", "price_objection", "booked_elsewhere", "dates_unavailable", "requirements_not_met", "unknown"
+    outcome_reasoning = Column(Text, nullable=True)
+    
+    # What guest was looking for
+    guest_requirements = Column(Text, nullable=True)  # JSON: ["pet-friendly", "pool", "large group"]
+    guest_questions = Column(Text, nullable=True)  # JSON: questions they asked
+    questions_answered = Column(Boolean, default=True)  # Did team answer all questions?
+    unanswered_questions = Column(Text, nullable=True)  # JSON: questions not answered
+    
+    # Team performance
+    team_mistakes = Column(Text, nullable=True)  # JSON: [{mistake, severity, impact}]
+    team_strengths = Column(Text, nullable=True)  # JSON: what team did well
+    response_quality_score = Column(Float, nullable=True)  # 0-1 score
+    
+    # Conversion analysis
+    conversion_likelihood = Column(Float, nullable=True)  # 0-1, how likely was this to convert
+    lost_revenue_estimate = Column(Float, nullable=True)  # Estimated $ lost
+    
+    # Recommendations
+    recommendations = Column(Text, nullable=True)  # JSON: [{action, priority, expected_impact}]
+    training_opportunities = Column(Text, nullable=True)  # JSON: areas for team training
+    
+    # Timestamps
+    analyzed_at = Column(DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<InquiryAnalysis {self.thread_id} - {self.guest_name} - {self.outcome}>"
+
+
 class HostifyThread(Base):
     """
     Hostify inbox threads (conversations).

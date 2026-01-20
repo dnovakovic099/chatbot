@@ -3,27 +3,43 @@ Embeddings and Vector Database Module.
 Provides semantic search capabilities using ChromaDB and OpenAI embeddings.
 """
 
+import sys
+print("[EMBEDDINGS] Module loading...", flush=True)
+
 import json
 import hashlib
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 
+print("[EMBEDDINGS] Importing chromadb...", flush=True)
 import chromadb
 from chromadb.config import Settings
-from openai import OpenAI
+print("[EMBEDDINGS] ChromaDB imported OK", flush=True)
 
+from openai import OpenAI
 from config import settings
 
-
 # Initialize OpenAI client for embeddings
+print("[EMBEDDINGS] Creating OpenAI client...", flush=True)
 openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+print("[EMBEDDINGS] OpenAI client OK", flush=True)
 
 # Initialize ChromaDB with persistent storage
-chroma_client = chromadb.PersistentClient(
-    path="./chroma_db",
-    settings=Settings(anonymized_telemetry=False)
-)
+print("[EMBEDDINGS] Creating ChromaDB client...", flush=True)
+try:
+    chroma_client = chromadb.PersistentClient(
+        path="./chroma_db",
+        settings=Settings(anonymized_telemetry=False)
+    )
+    print("[EMBEDDINGS] ChromaDB client OK", flush=True)
+except Exception as e:
+    print(f"[EMBEDDINGS] ChromaDB FAILED: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
+    # Create an in-memory client as fallback
+    print("[EMBEDDINGS] Falling back to in-memory ChromaDB", flush=True)
+    chroma_client = chromadb.Client(settings=Settings(anonymized_telemetry=False))
 
 
 # ============ EMBEDDING GENERATION ============

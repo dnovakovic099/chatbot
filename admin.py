@@ -2295,3 +2295,119 @@ async def get_guest_health_stats(db: Session = Depends(get_db)):
         "total_unresolved_issues": total_unresolved,
         "at_risk_count": risk_counts.get("high", 0) + risk_counts.get("critical", 0)
     }
+
+
+# ============ INQUIRY ANALYSIS ============
+
+@router.get("/inquiries")
+async def get_inquiries(
+    listing_id: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """Get analyzed inquiries that didn't convert to bookings."""
+    from guest_health import get_inquiry_analyses
+    
+    inquiries = get_inquiry_analyses(db, listing_id=listing_id, limit=limit)
+    
+    return {
+        "inquiries": inquiries,
+        "total": len(inquiries)
+    }
+
+
+@router.get("/inquiries/summary")
+async def get_inquiry_summary_endpoint(db: Session = Depends(get_db)):
+    """Get summary statistics for inquiry analysis."""
+    from guest_health import get_inquiry_summary
+    
+    return get_inquiry_summary(db)
+
+
+@router.post("/inquiries/refresh")
+async def refresh_inquiries(
+    days_back: int = 30,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """
+    Analyze recent inquiries that didn't convert to bookings.
+    
+    Args:
+        days_back: How many days of inquiries to analyze
+        limit: Max number of inquiries to analyze
+    """
+    from guest_health import refresh_inquiry_analysis
+    
+    result = await refresh_inquiry_analysis(db, days_back=days_back, limit=limit)
+    
+    return result
+
+
+@router.get("/inquiries/{thread_id}")
+async def get_inquiry_detail(thread_id: int, db: Session = Depends(get_db)):
+    """Get detailed inquiry analysis for a specific thread."""
+    from models import InquiryAnalysis, HostifyMessage
+    import json
+    
+    analysis = db.query(InquiryAnalysis).filter(
+        InquiryAnalysis.thread_id == thread_id
+    ).first()
+    
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Inquiry analysis not found")
+    
+    # Get messages for this inquiry
+    messages = db.query(HostifyMessage).filter(
+        HostifyMessage.inbox_id == thread_id
+    ).order_by(HostifyMessage.sent_at).all()
+    
+    message_list = []
+    for m in messages:
+        direction = m.direction if m.direction else "unknown"
+        if m.sender_type == "guest":
+            direction = "inbound"
+        elif m.sender_type in ["host", "automatic"]:
+            direction = "outbound"
+        
+        message_list.append({
+            "id": m.id,
+            "direction": direction,
+            "content": m.content,
+            "sender_name": m.sender_name,
+            "sent_at": m.sent_at.isoformat() if m.sent_at else None
+        })
+    
+    return {
+        "analysis": {
+            "id": analysis.id,
+            "thread_id": analysis.thread_id,
+            "guest_name": analysis.guest_name,
+            "guest_email": analysis.guest_email,
+            "listing_id": analysis.listing_id,
+            "listing_name": analysis.listing_name,
+            "inquiry_date": analysis.inquiry_date.isoformat() if analysis.inquiry_date else None,
+            "requested_checkin": analysis.requested_checkin.isoformat() if analysis.requested_checkin else None,
+            "requested_checkout": analysis.requested_checkout.isoformat() if analysis.requested_checkout else None,
+            "first_response_minutes": analysis.first_response_minutes,
+            "total_messages": analysis.total_messages,
+            "team_messages": analysis.team_messages,
+            "guest_messages": analysis.guest_messages,
+            "conversation_duration_hours": analysis.conversation_duration_hours,
+            "outcome": analysis.outcome,
+            "outcome_reasoning": analysis.outcome_reasoning,
+            "guest_requirements": json.loads(analysis.guest_requirements) if analysis.guest_requirements else [],
+            "guest_questions": json.loads(analysis.guest_questions) if analysis.guest_questions else [],
+            "questions_answered": analysis.questions_answered,
+            "unanswered_questions": json.loads(analysis.unanswered_questions) if analysis.unanswered_questions else [],
+            "team_mistakes": json.loads(analysis.team_mistakes) if analysis.team_mistakes else [],
+            "team_strengths": json.loads(analysis.team_strengths) if analysis.team_strengths else [],
+            "response_quality_score": analysis.response_quality_score,
+            "conversion_likelihood": analysis.conversion_likelihood,
+            "lost_revenue_estimate": analysis.lost_revenue_estimate,
+            "recommendations": json.loads(analysis.recommendations) if analysis.recommendations else [],
+            "training_opportunities": json.loads(analysis.training_opportunities) if analysis.training_opportunities else [],
+            "analyzed_at": analysis.analyzed_at.isoformat() if analysis.analyzed_at else None
+        },
+        "messages": message_list
+    }

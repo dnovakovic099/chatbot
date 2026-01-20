@@ -30,6 +30,10 @@
                     <span class="nav-icon">💚</span>
                     <span>Guest Health</span>
                 </a>
+                <a href="#" class="nav-item" data-view="inquiry-analysis">
+                    <span class="nav-icon">📉</span>
+                    <span>Lost Inquiries</span>
+                </a>
                 <a href="#" class="nav-item" data-view="conversations">
                     <span class="nav-icon">💬</span>
                     <span>Conversations</span>
@@ -383,6 +387,62 @@
                 </div>
             </section>
             
+            <!-- Inquiry Analysis View -->
+            <section class="view" id="view-inquiry-analysis">
+                <header class="view-header">
+                    <h1>📉 Lost Inquiry Analysis</h1>
+                    <div class="view-actions">
+                        <button class="btn btn-primary" onclick="refreshInquiries()">🔄 Analyze Inquiries</button>
+                    </div>
+                </header>
+                
+                <!-- Summary Stats -->
+                <div class="inquiry-stats-grid" id="inquiry-stats">
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-total-inquiries">0</div>
+                        <div class="stat-label">Analyzed Inquiries</div>
+                    </div>
+                    <div class="stat-card stat-warning">
+                        <div class="stat-value" id="stat-lost-revenue">$0</div>
+                        <div class="stat-label">Est. Lost Revenue</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-avg-response">0m</div>
+                        <div class="stat-label">Avg Response Time</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-avg-conversion">0%</div>
+                        <div class="stat-label">Avg Conversion Potential</div>
+                    </div>
+                </div>
+                
+                <!-- Common Issues Summary -->
+                <div class="inquiry-insights" id="inquiry-insights">
+                    <div class="insight-card">
+                        <h3>🚨 Common Team Mistakes</h3>
+                        <ul id="common-mistakes-list" class="insight-list"></ul>
+                    </div>
+                    <div class="insight-card">
+                        <h3>📚 Training Opportunities</h3>
+                        <ul id="training-needs-list" class="insight-list"></ul>
+                    </div>
+                    <div class="insight-card">
+                        <h3>📊 Outcome Breakdown</h3>
+                        <div id="outcome-breakdown" class="outcome-grid"></div>
+                    </div>
+                </div>
+                
+                <!-- Inquiry List -->
+                <div class="inquiry-list-container" id="inquiry-list-container">
+                    <div class="loading">Loading inquiry data...</div>
+                </div>
+                
+                <!-- Inquiry Detail Modal -->
+                <div class="inquiry-detail-modal" id="inquiry-detail-modal">
+                    <div class="inquiry-detail-content" id="inquiry-detail-content"></div>
+                </div>
+            </section>
+            
             <!-- Health Settings View -->
             <section class="view" id="view-health-settings">
                 <header class="view-header">
@@ -448,6 +508,6 @@
         </div>
     </div>
     
-    <script src="/static/app.js?v=8"></script>
+    <script src="/static/app.js?v=9"></script>
 </body>
 </html>

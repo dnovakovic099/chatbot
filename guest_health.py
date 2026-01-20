@@ -27,7 +27,7 @@ from config import settings
 from models import (
     SessionLocal, GuestIndex, GuestHealthSettings, GuestHealthAnalysis,
     SentimentLevel, Conversation, Message, MessageDirection, HostifyMessage,
-    HostifyThread
+    HostifyThread, InquiryAnalysis
 )
 from cache import HostifyClient
 
@@ -56,6 +56,34 @@ class GuestAnalysisResult(BaseModel):
     needs_attention: bool
     attention_reason: Optional[str]
     recommended_actions: List[Dict[str, Any]]
+
+
+class TeamMistake(BaseModel):
+    """A mistake made by the team during inquiry handling."""
+    mistake: str
+    severity: str  # minor, moderate, major, critical
+    impact: str  # How it affected conversion
+
+
+class InquiryAnalysisResult(BaseModel):
+    """Result of AI analysis of a lost inquiry."""
+    outcome: str  # no_response, price_objection, booked_elsewhere, dates_unavailable, requirements_not_met, ghost, unknown
+    outcome_reasoning: str
+    
+    guest_requirements: List[str]  # What they were looking for
+    guest_questions: List[str]  # Questions they asked
+    questions_answered: bool
+    unanswered_questions: List[str]
+    
+    team_mistakes: List[TeamMistake]
+    team_strengths: List[str]
+    response_quality_score: float  # 0-1
+    
+    conversion_likelihood: float  # 0-1, how likely this could have converted
+    lost_revenue_estimate: float  # Estimated $ lost based on dates/property
+    
+    recommendations: List[Dict[str, Any]]  # [{action, priority, expected_impact}]
+    training_opportunities: List[str]  # Areas for team improvement
 
 
 async def analyze_guest_messages(
@@ -1180,3 +1208,512 @@ def get_guest_health_summary(db: Session) -> List[Dict[str, Any]]:
     ))
     
     return result
+
+
+# ============ INQUIRY ANALYSIS ============
+
+async def analyze_inquiry_messages(
+    guest_name: str,
+    listing_name: str,
+    requested_checkin: Optional[datetime],
+    requested_checkout: Optional[datetime],
+    messages: List[Dict[str, Any]],
+    first_response_minutes: Optional[int],
+    nightly_rate_estimate: float = 500.0  # Default estimate
+) -> InquiryAnalysisResult:
+    """
+    Use AI to analyze why an inquiry didn't convert to a booking.
+    
+    Args:
+        guest_name: Name of the potential guest
+        listing_name: Property they inquired about
+        requested_checkin: Dates they wanted
+        requested_checkout: Dates they wanted
+        messages: List of messages in the conversation
+        first_response_minutes: How long until first team response
+        nightly_rate_estimate: Estimated nightly rate for revenue calculation
+    
+    Returns:
+        InquiryAnalysisResult with detailed analysis
+    """
+    # Format messages for AI
+    conversation_text = f"INQUIRY DETAILS:\n"
+    conversation_text += f"Guest: {guest_name}\n"
+    conversation_text += f"Property: {listing_name}\n"
+    
+    if requested_checkin and requested_checkout:
+        nights = (requested_checkout - requested_checkin).days
+        conversation_text += f"Requested dates: {requested_checkin.strftime('%b %d')} - {requested_checkout.strftime('%b %d')} ({nights} nights)\n"
+    
+    if first_response_minutes is not None:
+        if first_response_minutes < 60:
+            conversation_text += f"First response time: {first_response_minutes} minutes\n"
+        else:
+            conversation_text += f"First response time: {first_response_minutes // 60} hours {first_response_minutes % 60} minutes\n"
+    
+    conversation_text += f"\nCONVERSATION:\n"
+    
+    for msg in messages:
+        direction = msg.get("direction", "unknown")
+        sender = "GUEST" if direction == "inbound" else "TEAM"
+        content = msg.get("content", "")
+        sent_at = msg.get("sent_at", "")
+        conversation_text += f"[{sender}] {content}\n"
+    
+    system_prompt = """You are an expert at analyzing vacation rental inquiries to understand why potential guests didn't book.
+
+Analyze this inquiry conversation and provide insights for the property manager.
+
+OUTCOME CATEGORIES:
+- "booked_elsewhere": Guest likely booked a different property
+- "price_objection": Guest found price too high
+- "dates_unavailable": Requested dates weren't available
+- "requirements_not_met": Property didn't meet their needs (pets, amenities, etc.)
+- "slow_response": Team took too long to respond
+- "poor_communication": Team responses were unhelpful or unclear
+- "ghost": Guest stopped responding without explanation
+- "no_response": Team never responded to guest
+- "still_deciding": Conversation seems ongoing/undecided
+- "unknown": Can't determine reason
+
+TEAM MISTAKES TO LOOK FOR:
+- Slow initial response (>1 hour is concerning, >4 hours is bad)
+- Not answering specific questions
+- Not addressing concerns or objections
+- Missing upsell opportunities
+- Being too brief or impersonal
+- Not following up when guest went quiet
+- Not offering alternatives when dates unavailable
+- Being pushy or aggressive
+- Giving incorrect information
+
+Respond with a JSON object:
+{
+    "outcome": "one of the categories above",
+    "outcome_reasoning": "Detailed explanation of why they didn't book",
+    
+    "guest_requirements": ["list", "of", "what they wanted"],
+    "guest_questions": ["specific questions they asked"],
+    "questions_answered": true/false,
+    "unanswered_questions": ["questions that weren't answered"],
+    
+    "team_mistakes": [
+        {"mistake": "what went wrong", "severity": "minor|moderate|major|critical", "impact": "how it affected conversion"}
+    ],
+    "team_strengths": ["what the team did well"],
+    "response_quality_score": 0.0-1.0,
+    
+    "conversion_likelihood": 0.0-1.0,
+    "lost_revenue_estimate": estimated_dollars_lost,
+    
+    "recommendations": [
+        {"action": "what to do differently", "priority": "low|medium|high", "expected_impact": "how it would help"}
+    ],
+    "training_opportunities": ["areas where team could improve"]
+}
+
+Be objective and constructive. The goal is to help the team improve, not to blame them."""
+
+    try:
+        response = client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"{conversation_text}\n\nAnalyze why this inquiry didn't convert:"}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        
+        # Parse team mistakes
+        team_mistakes = []
+        for m in result.get("team_mistakes", []):
+            team_mistakes.append(TeamMistake(
+                mistake=m.get("mistake", ""),
+                severity=m.get("severity", "minor"),
+                impact=m.get("impact", "")
+            ))
+        
+        # Calculate lost revenue if not provided
+        lost_revenue = result.get("lost_revenue_estimate", 0)
+        if not lost_revenue and requested_checkin and requested_checkout:
+            nights = (requested_checkout - requested_checkin).days
+            lost_revenue = nights * nightly_rate_estimate * result.get("conversion_likelihood", 0.5)
+        
+        return InquiryAnalysisResult(
+            outcome=result.get("outcome", "unknown"),
+            outcome_reasoning=result.get("outcome_reasoning", ""),
+            guest_requirements=result.get("guest_requirements", []),
+            guest_questions=result.get("guest_questions", []),
+            questions_answered=result.get("questions_answered", True),
+            unanswered_questions=result.get("unanswered_questions", []),
+            team_mistakes=team_mistakes,
+            team_strengths=result.get("team_strengths", []),
+            response_quality_score=result.get("response_quality_score", 0.5),
+            conversion_likelihood=result.get("conversion_likelihood", 0.5),
+            lost_revenue_estimate=lost_revenue,
+            recommendations=result.get("recommendations", []),
+            training_opportunities=result.get("training_opportunities", [])
+        )
+        
+    except Exception as e:
+        print(f"[InquiryAnalysis] AI error: {e}")
+        return InquiryAnalysisResult(
+            outcome="unknown",
+            outcome_reasoning="Analysis failed",
+            guest_requirements=[],
+            guest_questions=[],
+            questions_answered=True,
+            unanswered_questions=[],
+            team_mistakes=[],
+            team_strengths=[],
+            response_quality_score=0.5,
+            conversion_likelihood=0.5,
+            lost_revenue_estimate=0,
+            recommendations=[],
+            training_opportunities=[]
+        )
+
+
+async def analyze_and_save_inquiry(db: Session, thread: HostifyThread) -> Optional[InquiryAnalysis]:
+    """
+    Analyze an inquiry thread and save the analysis.
+    """
+    try:
+        # Fetch messages for this thread
+        await fetch_thread_messages(db, thread)
+        
+        # Get messages
+        messages_query = db.query(HostifyMessage).filter(
+            HostifyMessage.inbox_id == thread.thread_id
+        ).order_by(HostifyMessage.sent_at).all()
+        
+        messages = []
+        first_guest_msg_time = None
+        first_team_response_time = None
+        
+        for m in messages_query:
+            direction = m.direction if m.direction else "unknown"
+            if m.sender_type == "guest":
+                direction = "inbound"
+                if first_guest_msg_time is None:
+                    first_guest_msg_time = m.sent_at
+            elif m.sender_type in ["host", "automatic"]:
+                direction = "outbound"
+                if first_team_response_time is None and first_guest_msg_time is not None:
+                    first_team_response_time = m.sent_at
+            
+            messages.append({
+                "direction": direction,
+                "content": m.content or "",
+                "sent_at": m.sent_at.isoformat() if m.sent_at else ""
+            })
+        
+        # Calculate first response time
+        first_response_minutes = None
+        if first_guest_msg_time and first_team_response_time:
+            delta = first_team_response_time - first_guest_msg_time
+            first_response_minutes = int(delta.total_seconds() / 60)
+        
+        # Count messages
+        total_messages = len(messages)
+        guest_messages = len([m for m in messages if m.get("direction") == "inbound"])
+        team_messages = total_messages - guest_messages
+        
+        # Calculate conversation duration
+        conversation_duration_hours = None
+        if messages:
+            first_msg_time = None
+            last_msg_time = None
+            for m in messages:
+                if m.get("sent_at"):
+                    try:
+                        msg_time = datetime.fromisoformat(m["sent_at"])
+                        if first_msg_time is None:
+                            first_msg_time = msg_time
+                        last_msg_time = msg_time
+                    except:
+                        pass
+            if first_msg_time and last_msg_time:
+                conversation_duration_hours = (last_msg_time - first_msg_time).total_seconds() / 3600
+        
+        # Run AI analysis
+        analysis = await analyze_inquiry_messages(
+            guest_name=thread.guest_name or "Guest",
+            listing_name=thread.listing_name or "Property",
+            requested_checkin=thread.checkin,
+            requested_checkout=thread.checkout,
+            messages=messages,
+            first_response_minutes=first_response_minutes
+        )
+        
+        # Find or update existing record
+        existing = db.query(InquiryAnalysis).filter(
+            InquiryAnalysis.thread_id == thread.thread_id
+        ).first()
+        
+        if existing:
+            existing.guest_name = thread.guest_name
+            existing.guest_email = thread.guest_email
+            existing.listing_id = thread.listing_id
+            existing.listing_name = thread.listing_name
+            existing.inquiry_date = thread.last_message_at
+            existing.requested_checkin = thread.checkin
+            existing.requested_checkout = thread.checkout
+            existing.first_response_minutes = first_response_minutes
+            existing.total_messages = total_messages
+            existing.team_messages = team_messages
+            existing.guest_messages = guest_messages
+            existing.conversation_duration_hours = conversation_duration_hours
+            existing.outcome = analysis.outcome
+            existing.outcome_reasoning = analysis.outcome_reasoning
+            existing.guest_requirements = json.dumps(analysis.guest_requirements)
+            existing.guest_questions = json.dumps(analysis.guest_questions)
+            existing.questions_answered = analysis.questions_answered
+            existing.unanswered_questions = json.dumps(analysis.unanswered_questions)
+            existing.team_mistakes = json.dumps([m.model_dump() for m in analysis.team_mistakes])
+            existing.team_strengths = json.dumps(analysis.team_strengths)
+            existing.response_quality_score = analysis.response_quality_score
+            existing.conversion_likelihood = analysis.conversion_likelihood
+            existing.lost_revenue_estimate = analysis.lost_revenue_estimate
+            existing.recommendations = json.dumps(analysis.recommendations)
+            existing.training_opportunities = json.dumps(analysis.training_opportunities)
+            existing.analyzed_at = datetime.utcnow()
+            
+            db.commit()
+            print(f"[InquiryAnalysis] Updated: {thread.guest_name} - {analysis.outcome}")
+            return existing
+        else:
+            new_analysis = InquiryAnalysis(
+                thread_id=thread.thread_id,
+                guest_name=thread.guest_name,
+                guest_email=thread.guest_email,
+                listing_id=thread.listing_id,
+                listing_name=thread.listing_name,
+                inquiry_date=thread.last_message_at,
+                requested_checkin=thread.checkin,
+                requested_checkout=thread.checkout,
+                first_response_minutes=first_response_minutes,
+                total_messages=total_messages,
+                team_messages=team_messages,
+                guest_messages=guest_messages,
+                conversation_duration_hours=conversation_duration_hours,
+                outcome=analysis.outcome,
+                outcome_reasoning=analysis.outcome_reasoning,
+                guest_requirements=json.dumps(analysis.guest_requirements),
+                guest_questions=json.dumps(analysis.guest_questions),
+                questions_answered=analysis.questions_answered,
+                unanswered_questions=json.dumps(analysis.unanswered_questions),
+                team_mistakes=json.dumps([m.model_dump() for m in analysis.team_mistakes]),
+                team_strengths=json.dumps(analysis.team_strengths),
+                response_quality_score=analysis.response_quality_score,
+                conversion_likelihood=analysis.conversion_likelihood,
+                lost_revenue_estimate=analysis.lost_revenue_estimate,
+                recommendations=json.dumps(analysis.recommendations),
+                training_opportunities=json.dumps(analysis.training_opportunities),
+                analyzed_at=datetime.utcnow()
+            )
+            db.add(new_analysis)
+            db.commit()
+            db.refresh(new_analysis)
+            print(f"[InquiryAnalysis] Created: {thread.guest_name} - {analysis.outcome}")
+            return new_analysis
+            
+    except Exception as e:
+        print(f"[InquiryAnalysis] Error analyzing thread {thread.thread_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+        return None
+
+
+async def refresh_inquiry_analysis(db: Session, days_back: int = 30, limit: int = 50) -> Dict[str, Any]:
+    """
+    Analyze recent inquiries that didn't convert to bookings.
+    
+    Args:
+        db: Database session
+        days_back: How many days of inquiries to analyze
+        limit: Max number of inquiries to analyze
+    
+    Returns:
+        Summary of analysis
+    """
+    # Get monitored properties
+    monitored = get_monitored_properties(db)
+    
+    if not monitored:
+        return {
+            "status": "no_properties",
+            "message": "No properties are configured for monitoring.",
+            "inquiries_analyzed": 0
+        }
+    
+    listing_ids = [p["listing_id"] for p in monitored]
+    
+    # Get confirmed reservation IDs to exclude
+    now = datetime.utcnow()
+    cutoff_date = now - timedelta(days=days_back)
+    
+    confirmed_reservation_ids = [
+        g.reservation_id for g in db.query(GuestIndex.reservation_id).filter(
+            GuestIndex.listing_id.in_(listing_ids),
+            GuestIndex.reservation_id.isnot(None)
+        ).all()
+    ]
+    
+    # Find threads that are NOT confirmed reservations (inquiries)
+    # Look for threads from the past N days at monitored properties
+    inquiry_threads = db.query(HostifyThread).filter(
+        HostifyThread.listing_id.in_(listing_ids),
+        HostifyThread.checkin >= cutoff_date,  # Inquired for dates after cutoff
+        ~HostifyThread.reservation_id.in_(confirmed_reservation_ids) if confirmed_reservation_ids else True
+    ).order_by(HostifyThread.last_message_at.desc()).limit(limit).all()
+    
+    print(f"[InquiryAnalysis] Found {len(inquiry_threads)} inquiry threads to analyze")
+    
+    analyzed = 0
+    errors = 0
+    
+    for i, thread in enumerate(inquiry_threads):
+        print(f"[InquiryAnalysis] [{i+1}/{len(inquiry_threads)}] Analyzing {thread.guest_name}...")
+        result = await analyze_and_save_inquiry(db, thread)
+        if result:
+            analyzed += 1
+        else:
+            errors += 1
+        await asyncio.sleep(0.3)  # Rate limit
+    
+    return {
+        "status": "complete",
+        "properties_monitored": len(monitored),
+        "inquiries_found": len(inquiry_threads),
+        "inquiries_analyzed": analyzed,
+        "errors": errors
+    }
+
+
+def get_inquiry_analyses(db: Session, listing_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Get inquiry analyses, optionally filtered by listing.
+    """
+    query = db.query(InquiryAnalysis)
+    
+    if listing_id:
+        query = query.filter(InquiryAnalysis.listing_id == listing_id)
+    
+    analyses = query.order_by(InquiryAnalysis.analyzed_at.desc()).limit(limit).all()
+    
+    result = []
+    for a in analyses:
+        result.append({
+            "id": a.id,
+            "thread_id": a.thread_id,
+            "guest_name": a.guest_name,
+            "guest_email": a.guest_email,
+            "listing_id": a.listing_id,
+            "listing_name": a.listing_name,
+            "inquiry_date": a.inquiry_date.isoformat() if a.inquiry_date else None,
+            "requested_checkin": a.requested_checkin.isoformat() if a.requested_checkin else None,
+            "requested_checkout": a.requested_checkout.isoformat() if a.requested_checkout else None,
+            "first_response_minutes": a.first_response_minutes,
+            "total_messages": a.total_messages,
+            "team_messages": a.team_messages,
+            "guest_messages": a.guest_messages,
+            "conversation_duration_hours": a.conversation_duration_hours,
+            "outcome": a.outcome,
+            "outcome_reasoning": a.outcome_reasoning,
+            "guest_requirements": json.loads(a.guest_requirements) if a.guest_requirements else [],
+            "guest_questions": json.loads(a.guest_questions) if a.guest_questions else [],
+            "questions_answered": a.questions_answered,
+            "unanswered_questions": json.loads(a.unanswered_questions) if a.unanswered_questions else [],
+            "team_mistakes": json.loads(a.team_mistakes) if a.team_mistakes else [],
+            "team_strengths": json.loads(a.team_strengths) if a.team_strengths else [],
+            "response_quality_score": a.response_quality_score,
+            "conversion_likelihood": a.conversion_likelihood,
+            "lost_revenue_estimate": a.lost_revenue_estimate,
+            "recommendations": json.loads(a.recommendations) if a.recommendations else [],
+            "training_opportunities": json.loads(a.training_opportunities) if a.training_opportunities else [],
+            "analyzed_at": a.analyzed_at.isoformat() if a.analyzed_at else None
+        })
+    
+    # Sort by lost revenue (highest first), then by conversion likelihood
+    result.sort(key=lambda x: (
+        -(x["lost_revenue_estimate"] or 0),
+        -(x["conversion_likelihood"] or 0)
+    ))
+    
+    return result
+
+
+def get_inquiry_summary(db: Session) -> Dict[str, Any]:
+    """
+    Get summary statistics for inquiry analysis.
+    """
+    analyses = db.query(InquiryAnalysis).all()
+    
+    if not analyses:
+        return {
+            "total_inquiries": 0,
+            "total_lost_revenue": 0,
+            "avg_response_time": 0,
+            "avg_conversion_likelihood": 0,
+            "outcomes": {},
+            "common_mistakes": [],
+            "top_training_needs": []
+        }
+    
+    # Calculate stats
+    total_lost_revenue = sum(a.lost_revenue_estimate or 0 for a in analyses)
+    response_times = [a.first_response_minutes for a in analyses if a.first_response_minutes is not None]
+    avg_response_time = sum(response_times) / len(response_times) if response_times else 0
+    
+    likelihoods = [a.conversion_likelihood for a in analyses if a.conversion_likelihood is not None]
+    avg_conversion_likelihood = sum(likelihoods) / len(likelihoods) if likelihoods else 0
+    
+    # Count outcomes
+    outcomes = {}
+    for a in analyses:
+        outcome = a.outcome or "unknown"
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    
+    # Aggregate common mistakes
+    mistake_counts = {}
+    for a in analyses:
+        if a.team_mistakes:
+            try:
+                mistakes = json.loads(a.team_mistakes)
+                for m in mistakes:
+                    mistake = m.get("mistake", "")
+                    if mistake:
+                        mistake_counts[mistake] = mistake_counts.get(mistake, 0) + 1
+            except:
+                pass
+    
+    common_mistakes = sorted(mistake_counts.items(), key=lambda x: -x[1])[:10]
+    
+    # Aggregate training needs
+    training_counts = {}
+    for a in analyses:
+        if a.training_opportunities:
+            try:
+                opportunities = json.loads(a.training_opportunities)
+                for t in opportunities:
+                    training_counts[t] = training_counts.get(t, 0) + 1
+            except:
+                pass
+    
+    top_training_needs = sorted(training_counts.items(), key=lambda x: -x[1])[:10]
+    
+    return {
+        "total_inquiries": len(analyses),
+        "total_lost_revenue": total_lost_revenue,
+        "avg_response_time_minutes": round(avg_response_time, 1),
+        "avg_conversion_likelihood": round(avg_conversion_likelihood, 2),
+        "outcomes": outcomes,
+        "common_mistakes": [{"mistake": m, "count": c} for m, c in common_mistakes],
+        "top_training_needs": [{"topic": t, "count": c} for t, c in top_training_needs]
+    }
