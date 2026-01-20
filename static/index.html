@@ -26,6 +26,10 @@
                     <span class="nav-icon">📊</span>
                     <span>Dashboard</span>
                 </a>
+                <a href="#" class="nav-item" data-view="guest-health">
+                    <span class="nav-icon">💚</span>
+                    <span>Guest Health</span>
+                </a>
                 <a href="#" class="nav-item" data-view="conversations">
                     <span class="nav-icon">💬</span>
                     <span>Conversations</span>
@@ -38,12 +42,20 @@
                     <span class="nav-icon">👥</span>
                     <span>Guest Cache</span>
                 </a>
+                <a href="#" class="nav-item" data-view="knowledge">
+                    <span class="nav-icon">📚</span>
+                    <span>Property Knowledge</span>
+                </a>
                 <a href="#" class="nav-item" data-view="logs">
                     <span class="nav-icon">📋</span>
                     <span>System Logs</span>
                 </a>
-                <a href="#" class="nav-item" data-view="config">
+                <a href="#" class="nav-item" data-view="health-settings">
                     <span class="nav-icon">⚙️</span>
+                    <span>Health Settings</span>
+                </a>
+                <a href="#" class="nav-item" data-view="config">
+                    <span class="nav-icon">🔧</span>
                     <span>Configuration</span>
                 </a>
             </nav>
@@ -264,6 +276,39 @@
                 </div>
             </section>
             
+            <!-- Property Knowledge View -->
+            <section class="view" id="view-knowledge">
+                <header class="view-header">
+                    <h1>Property Knowledge Base</h1>
+                    <div class="view-actions">
+                        <button class="btn btn-primary" onclick="triggerLearning()">🧠 Learn from Messages</button>
+                        <button class="btn btn-secondary" onclick="loadKnowledgeListings()">↻ Refresh</button>
+                    </div>
+                </header>
+                
+                <div class="knowledge-container">
+                    <!-- Left panel: Property list -->
+                    <div class="knowledge-listings" id="knowledge-listings">
+                        <div class="knowledge-header">
+                            <h3>Properties</h3>
+                            <span class="knowledge-count" id="knowledge-listing-count">0 properties</span>
+                        </div>
+                        <div class="knowledge-list" id="knowledge-list">
+                            <div class="loading">Loading...</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Right panel: Property detail -->
+                    <div class="knowledge-detail" id="knowledge-detail">
+                        <div class="empty-state">
+                            <span class="empty-icon">📚</span>
+                            <p>Select a property to view and manage its knowledge base</p>
+                            <p class="help-text">Upload property documents or let the AI learn from past conversations</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
             <!-- Config View -->
             <section class="view" id="view-config">
                 <header class="view-header">
@@ -272,6 +317,105 @@
                 
                 <div class="config-container" id="config-container">
                     <div class="loading">Loading...</div>
+                </div>
+            </section>
+            
+            <!-- Guest Health View -->
+            <section class="view" id="view-guest-health">
+                <header class="view-header">
+                    <h1>Guest Health Monitor</h1>
+                    <div class="view-actions">
+                        <button class="btn btn-primary" onclick="refreshGuestHealth()">🔄 Refresh Analysis</button>
+                    </div>
+                </header>
+                
+                <!-- Stats Cards -->
+                <div class="health-stats-grid" id="health-stats-grid">
+                    <div class="stat-card highlight">
+                        <div class="stat-value" id="health-stat-total">-</div>
+                        <div class="stat-label">Checked-In Guests</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-value" id="health-stat-attention">-</div>
+                        <div class="stat-label">Need Attention</div>
+                    </div>
+                    <div class="stat-card" style="background: linear-gradient(135deg, var(--bg-secondary) 0%, rgba(239, 68, 68, 0.15) 100%);">
+                        <div class="stat-value" id="health-stat-risk">-</div>
+                        <div class="stat-label">At Risk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="health-stat-issues">-</div>
+                        <div class="stat-label">Open Issues</div>
+                    </div>
+                </div>
+                
+                <!-- Filter -->
+                <div class="health-filter-bar">
+                    <select id="health-filter-sentiment" onchange="filterGuestHealth()">
+                        <option value="">All Sentiments</option>
+                        <option value="very_unhappy">Very Unhappy</option>
+                        <option value="unhappy">Unhappy</option>
+                        <option value="neutral">Neutral</option>
+                        <option value="happy">Happy</option>
+                        <option value="very_happy">Very Happy</option>
+                    </select>
+                    <select id="health-filter-risk" onchange="filterGuestHealth()">
+                        <option value="">All Risk Levels</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                    </select>
+                    <label class="checkbox-filter">
+                        <input type="checkbox" id="health-filter-attention" onchange="filterGuestHealth()">
+                        <span>Only Needs Attention</span>
+                    </label>
+                </div>
+                
+                <!-- Guest Health Grid -->
+                <div class="health-guests-container" id="health-guests-container">
+                    <div class="loading">Loading guest health data...</div>
+                </div>
+                
+                <!-- Guest Detail Modal (shown when clicking a guest) -->
+                <div class="health-detail-panel" id="health-detail-panel" style="display: none;">
+                    <div class="health-detail-content" id="health-detail-content"></div>
+                </div>
+            </section>
+            
+            <!-- Health Settings View -->
+            <section class="view" id="view-health-settings">
+                <header class="view-header">
+                    <h1>Guest Health Settings</h1>
+                    <div class="view-actions">
+                        <button class="btn btn-primary" onclick="saveHealthSettings()">💾 Save Settings</button>
+                    </div>
+                </header>
+                
+                <div class="settings-intro">
+                    <div class="intro-card">
+                        <h2>📊 Configure Guest Health Monitoring</h2>
+                        <p>Select which properties to monitor for guest sentiment analysis. The system will analyze messages from checked-in guests at these properties and flag those who may need attention.</p>
+                        <p class="help-text">Only selected properties will be included in the Guest Health dashboard. This helps focus on properties where proactive guest management is most important.</p>
+                    </div>
+                </div>
+                
+                <div class="settings-content">
+                    <div class="property-selection-header">
+                        <h3>Select Properties to Monitor</h3>
+                        <div class="selection-actions">
+                            <button class="btn btn-secondary btn-small" onclick="selectAllProperties()">Select All</button>
+                            <button class="btn btn-secondary btn-small" onclick="deselectAllProperties()">Deselect All</button>
+                        </div>
+                    </div>
+                    
+                    <div class="property-list-container" id="property-list-container">
+                        <div class="loading">Loading properties...</div>
+                    </div>
+                    
+                    <div class="settings-footer">
+                        <p id="selected-count">0 properties selected</p>
+                    </div>
                 </div>
             </section>
         </main>
@@ -304,6 +448,6 @@
         </div>
     </div>
     
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=8"></script>
 </body>
 </html>

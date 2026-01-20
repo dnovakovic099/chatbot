@@ -39,6 +39,7 @@ logs/
 
 # ChromaDB / Vector stores
 chroma_data/
+chroma_db/
 .chroma/
 
 # Temporary files
@@ -54,3 +55,15 @@ htmlcov/
 # Build
 dist/
 build/
+
+# Generated RAG rules (review files)
+generated_rag_rules/
+
+# Uploaded property documents
+uploads/
+
+# Property knowledge folders
+property_knowledge/
+
+# Generated data files
+mansion_*.json

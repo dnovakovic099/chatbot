@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from pydantic import BaseModel
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 
@@ -45,6 +45,7 @@ class MessageDetail(BaseModel):
     direction: str
     source: str
     content: str
+    attachment_url: Optional[str] = None  # Image/file attachments
     sent_at: datetime
     ai_confidence: Optional[float]
     was_auto_sent: bool
@@ -269,6 +270,7 @@ async def get_conversation(conversation_id: int, db: Session = Depends(get_db)):
                 direction=m.direction.value if m.direction else "unknown",
                 source=m.source,
                 content=m.content,
+                attachment_url=m.attachment_url,  # Include image attachments
                 sent_at=m.sent_at,
                 ai_confidence=m.ai_confidence,
                 was_auto_sent=m.was_auto_sent,
@@ -333,6 +335,7 @@ async def generate_suggestion(
         guest_context = GuestIndex(
             guest_phone=conv.guest_phone or "unknown",
             guest_name=conv.guest_name,
+            listing_id=conv.listing_id,  # Include listing_id for RAG lookup
             listing_name=conv.listing_name,
             check_in_date=conv.check_in_date,
             check_out_date=conv.check_out_date,
@@ -442,6 +445,7 @@ async def generate_and_save_suggestion(conversation_id: int, db: Session = Depen
         guest_context = GuestIndex(
             guest_phone=conv.guest_phone or "unknown",
             guest_name=conv.guest_name,
+            listing_id=conv.listing_id,  # Include listing_id for RAG lookup
             listing_name=conv.listing_name,
             check_in_date=conv.check_in_date,
             check_out_date=conv.check_out_date,
@@ -542,6 +546,7 @@ async def generate_suggestion_for_message(message_id: int, db: Session = Depends
         guest_context = GuestIndex(
             guest_phone=conv.guest_phone or "unknown",
             guest_name=conv.guest_name,
+            listing_id=conv.listing_id,  # Include listing_id for RAG lookup
             listing_name=conv.listing_name,
             check_in_date=conv.check_in_date,
             check_out_date=conv.check_out_date,
@@ -788,6 +793,174 @@ async def trigger_message_sync(limit: int = 200):
     await sync_messages(limit_threads=limit)
     
     return {"status": "message_sync_complete", "limit": limit}
+
+
+@router.post("/sync/messages/recent")
+async def sync_recent_messages(days: int = 3, db: Session = Depends(get_db)):
+    """
+    Fetch and save messages from the last N days as if they came in via webhook.
+    This backfills recent message history.
+    
+    Args:
+        days: Number of days to look back (default 3)
+    """
+    from cache import hostify_client, _parse_datetime
+    from models import Conversation, Message, ConversationStatus
+    from utils import normalize_phone
+    import asyncio
+    
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    
+    print(f"[Sync Recent] Fetching messages from last {days} days (since {cutoff})...")
+    
+    # Fetch all threads
+    all_threads = []
+    page = 1
+    per_page = 100
+    
+    while True:
+        threads = await hostify_client.get_inbox_threads(limit=100, page=page)
+        if not threads:
+            break
+        all_threads.extend(threads)
+        print(f"[Sync Recent] Fetched page {page}: {len(threads)} threads")
+        page += 1
+        await asyncio.sleep(0.1)
+    
+    print(f"[Sync Recent] Total threads: {len(all_threads)}")
+    
+    # Filter to threads with recent activity
+    recent_threads = []
+    for t in all_threads:
+        last_msg = t.get("last_message")
+        if last_msg:
+            last_msg_time = _parse_datetime(last_msg)
+            if last_msg_time and last_msg_time >= cutoff:
+                recent_threads.append(t)
+    
+    print(f"[Sync Recent] Threads with activity in last {days} days: {len(recent_threads)}")
+    
+    conversations_created = 0
+    messages_synced = 0
+    
+    for i, thread in enumerate(recent_threads):
+        try:
+            inbox_id = thread.get("id")
+            reservation_id = str(thread.get("reservation_id", ""))
+            guest_name = thread.get("guest_name", "Guest")
+            guest_phone = str(thread.get("guest_phone", "")) if thread.get("guest_phone") else None
+            listing_name = thread.get("listing_title") or thread.get("listing", "")
+            listing_id = str(thread.get("listing_id", ""))
+            
+            checkin_str = thread.get("checkin")
+            checkout_str = thread.get("checkout")
+            check_in_date = _parse_datetime(checkin_str) if checkin_str else None
+            check_out_date = _parse_datetime(checkout_str) if checkout_str else None
+            booking_source = thread.get("integration_type_name")
+            
+            # Find or create conversation
+            conversation = None
+            if reservation_id:
+                conversation = db.query(Conversation).filter(
+                    Conversation.hostify_reservation_id == reservation_id
+                ).first()
+            
+            if not conversation and guest_phone:
+                normalized_phone = normalize_phone(guest_phone)
+                if normalized_phone:
+                    conversation = db.query(Conversation).filter(
+                        Conversation.guest_phone == normalized_phone
+                    ).first()
+            
+            if not conversation:
+                phone_to_use = normalize_phone(guest_phone) if guest_phone else f"inbox_{inbox_id}"
+                conversation = Conversation(
+                    guest_phone=phone_to_use,
+                    guest_name=guest_name,
+                    listing_id=listing_id,
+                    listing_name=listing_name,
+                    hostify_reservation_id=reservation_id,
+                    check_in_date=check_in_date,
+                    check_out_date=check_out_date,
+                    booking_source=booking_source,
+                    status=ConversationStatus.active,
+                    created_at=datetime.utcnow()
+                )
+                db.add(conversation)
+                db.flush()
+                conversations_created += 1
+            else:
+                # Update existing
+                if listing_name and not conversation.listing_name:
+                    conversation.listing_name = listing_name
+                if listing_id and not conversation.listing_id:
+                    conversation.listing_id = listing_id
+                if not conversation.check_in_date and check_in_date:
+                    conversation.check_in_date = check_in_date
+                if not conversation.check_out_date and check_out_date:
+                    conversation.check_out_date = check_out_date
+            
+            # Fetch messages
+            messages = await hostify_client.get_inbox_messages(inbox_id, limit=100)
+            
+            for msg_data in messages:
+                msg_id = str(msg_data.get("id", ""))
+                
+                # Skip if exists
+                if db.query(Message).filter(Message.external_id == msg_id).first():
+                    continue
+                
+                # Determine direction
+                sender_field = msg_data.get("from", "")
+                if sender_field == "guest":
+                    direction = "inbound"
+                else:
+                    direction = "outbound"
+                
+                msg_time = msg_data.get("created") or msg_data.get("sent_at")
+                sent_at = _parse_datetime(msg_time) if msg_time else datetime.utcnow()
+                
+                content = msg_data.get("message") or msg_data.get("body") or ""
+                attachment_url = msg_data.get("attachment_url") or msg_data.get("image")
+                
+                if not content and not attachment_url:
+                    continue
+                
+                message = Message(
+                    conversation_id=conversation.id,
+                    direction=direction,
+                    source="hostify",
+                    content=content,
+                    attachment_url=attachment_url,
+                    external_id=msg_id,
+                    sent_at=sent_at,
+                    was_auto_sent=False,
+                    was_human_edited=False
+                )
+                db.add(message)
+                messages_synced += 1
+            
+            db.commit()
+            
+            if messages:
+                print(f"[Sync Recent] [{i+1}/{len(recent_threads)}] {guest_name}: {len(messages)} messages")
+            
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            print(f"[Sync Recent] Error on thread {thread.get('id')}: {e}")
+            db.rollback()
+            continue
+    
+    print(f"[Sync Recent] Done! Conversations: {conversations_created}, Messages: {messages_synced}")
+    
+    return {
+        "status": "complete",
+        "days": days,
+        "threads_processed": len(recent_threads),
+        "conversations_created": conversations_created,
+        "messages_synced": messages_synced
+    }
 
 
 @router.post("/sync/test")
@@ -1386,3 +1559,739 @@ async def delete_hostify_webhook(webhook_id: int):
             return {"error": f"Hostify API error: {response.status_code}", "body": response.text}
         
         return {"status": "deleted", "webhook_id": webhook_id}
+
+
+# ============ PROPERTY KNOWLEDGE BASE ============
+
+from fastapi import UploadFile, File, Form, BackgroundTasks
+import shutil
+import hashlib
+from pathlib import Path
+
+
+class KnowledgeEntryCreate(BaseModel):
+    listing_id: str
+    listing_name: str
+    knowledge_type: str  # amenity, house_rule, local_recommendation, appliance_guide, common_issue, faq, general
+    title: str
+    content: str
+    question: Optional[str] = None
+    answer: Optional[str] = None
+
+
+class KnowledgeEntryResponse(BaseModel):
+    id: int
+    listing_id: str
+    listing_name: str
+    knowledge_type: str
+    title: str
+    content: str
+    question: Optional[str]
+    answer: Optional[str]
+    source: str
+    confidence: float
+    times_used: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/knowledge/listings")
+async def get_listings_with_knowledge(db: Session = Depends(get_db)):
+    """Get all listings that have knowledge entries or uploaded files."""
+    from knowledge_base import PropertyKnowledge, UploadedFile
+    
+    # Get unique listings from knowledge
+    knowledge_listings = db.query(
+        PropertyKnowledge.listing_id,
+        PropertyKnowledge.listing_name,
+        func.count(PropertyKnowledge.id).label('knowledge_count')
+    ).group_by(
+        PropertyKnowledge.listing_id,
+        PropertyKnowledge.listing_name
+    ).all()
+    
+    # Get unique listings from uploaded files
+    file_listings = db.query(
+        UploadedFile.listing_id,
+        UploadedFile.listing_name,
+        func.count(UploadedFile.id).label('file_count')
+    ).group_by(
+        UploadedFile.listing_id,
+        UploadedFile.listing_name
+    ).all()
+    
+    # Combine results
+    listings = {}
+    for lid, lname, count in knowledge_listings:
+        if lid not in listings:
+            listings[lid] = {"listing_id": lid, "listing_name": lname, "knowledge_count": 0, "file_count": 0}
+        listings[lid]["knowledge_count"] = count
+    
+    for lid, lname, count in file_listings:
+        if lid not in listings:
+            listings[lid] = {"listing_id": lid, "listing_name": lname, "knowledge_count": 0, "file_count": 0}
+        listings[lid]["file_count"] = count
+    
+    # Also include all properties from conversations that don't have knowledge yet
+    conv_listings = db.query(
+        Conversation.listing_id,
+        Conversation.listing_name
+    ).filter(
+        Conversation.listing_id.isnot(None)
+    ).distinct().all()
+    
+    for lid, lname in conv_listings:
+        if lid and lid not in listings:
+            listings[lid] = {"listing_id": lid, "listing_name": lname, "knowledge_count": 0, "file_count": 0}
+    
+    return {"listings": list(listings.values())}
+
+
+@router.get("/knowledge/{listing_id}")
+async def get_property_knowledge(listing_id: str, db: Session = Depends(get_db)):
+    """Get all knowledge entries for a specific property."""
+    from knowledge_base import PropertyKnowledge, UploadedFile, get_property_knowledge_summary
+    
+    summary = get_property_knowledge_summary(listing_id)
+    
+    # Also get uploaded files
+    files = db.query(UploadedFile).filter(
+        UploadedFile.listing_id == listing_id
+    ).order_by(UploadedFile.uploaded_at.desc()).all()
+    
+    summary["files"] = [
+        {
+            "id": f.id,
+            "filename": f.original_filename,
+            "file_type": f.file_type,
+            "file_size": f.file_size,
+            "processed": f.processed,
+            "entries_created": f.knowledge_entries_created,
+            "uploaded_at": f.uploaded_at.isoformat() if f.uploaded_at else None
+        }
+        for f in files
+    ]
+    
+    return summary
+
+
+@router.post("/knowledge/{listing_id}/upload")
+async def upload_property_file(
+    listing_id: str,
+    listing_name: str = Form(...),
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Upload a property document for knowledge extraction.
+    
+    Supported formats: PDF, DOCX, TXT, MD, JSON
+    """
+    from knowledge_base import UploadedFile, UPLOAD_DIR, process_uploaded_file
+    
+    # Validate file type
+    filename = file.filename or "unknown"
+    file_ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    
+    allowed_types = ['pdf', 'docx', 'txt', 'md', 'json', 'doc']
+    if file_ext not in allowed_types:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported file type: {file_ext}. Allowed: {', '.join(allowed_types)}"
+        )
+    
+    # Read file content
+    content = await file.read()
+    file_size = len(content)
+    
+    if file_size > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 10MB.")
+    
+    # Calculate hash for deduplication
+    file_hash = hashlib.sha256(content).hexdigest()
+    
+    # Check for duplicate
+    existing = db.query(UploadedFile).filter(
+        UploadedFile.listing_id == listing_id,
+        UploadedFile.file_hash == file_hash
+    ).first()
+    
+    if existing:
+        return {
+            "status": "duplicate",
+            "message": "This file has already been uploaded for this property",
+            "file_id": existing.id
+        }
+    
+    # Save file
+    stored_filename = f"{listing_id}_{file_hash[:8]}_{filename}"
+    file_path = UPLOAD_DIR / stored_filename
+    
+    with open(file_path, 'wb') as f:
+        f.write(content)
+    
+    # Create database record
+    file_record = UploadedFile(
+        listing_id=listing_id,
+        listing_name=listing_name,
+        filename=stored_filename,
+        original_filename=filename,
+        file_type=file_ext,
+        file_size=file_size,
+        file_hash=file_hash
+    )
+    db.add(file_record)
+    db.commit()
+    db.refresh(file_record)
+    
+    log_event("file_uploaded", payload={
+        "listing_id": listing_id,
+        "filename": filename,
+        "file_size": file_size
+    })
+    
+    # Process file in background
+    if background_tasks:
+        background_tasks.add_task(process_uploaded_file, file_record.id)
+    
+    return {
+        "status": "uploaded",
+        "file_id": file_record.id,
+        "filename": filename,
+        "message": "File uploaded. Processing will begin shortly."
+    }
+
+
+@router.post("/knowledge/{listing_id}/process/{file_id}")
+async def process_file(listing_id: str, file_id: int, db: Session = Depends(get_db)):
+    """Manually trigger processing of an uploaded file."""
+    from knowledge_base import UploadedFile, process_uploaded_file
+    
+    file_record = db.query(UploadedFile).filter(
+        UploadedFile.id == file_id,
+        UploadedFile.listing_id == listing_id
+    ).first()
+    
+    if not file_record:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    result = await process_uploaded_file(file_id)
+    return result
+
+
+@router.post("/knowledge/learn")
+async def trigger_learning(
+    listing_id: Optional[str] = None,
+    limit: int = 500,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Trigger AI learning from past conversations.
+    
+    This analyzes past guest-host conversations to extract:
+    - Common questions and good answers
+    - Property-specific information
+    - Troubleshooting patterns
+    
+    Args:
+        listing_id: Optional - only learn from this property's conversations
+        limit: Maximum conversations to analyze (default 500)
+    """
+    from knowledge_base import learn_from_messages, LearningSession
+    
+    # Check if learning is already running
+    running = db.query(LearningSession).filter(
+        LearningSession.status == "running"
+    ).first()
+    
+    if running:
+        return {
+            "status": "already_running",
+            "message": "A learning session is already in progress",
+            "session_id": running.id
+        }
+    
+    # Run learning (this can take a while, so run in background if available)
+    if background_tasks:
+        background_tasks.add_task(learn_from_messages, listing_id, limit)
+        return {
+            "status": "started",
+            "message": "Learning session started in background"
+        }
+    else:
+        result = await learn_from_messages(listing_id, limit)
+        return result
+
+
+@router.get("/knowledge/learning-sessions")
+async def get_learning_sessions(limit: int = 10, db: Session = Depends(get_db)):
+    """Get recent learning session history."""
+    from knowledge_base import LearningSession
+    
+    sessions = db.query(LearningSession).order_by(
+        LearningSession.started_at.desc()
+    ).limit(limit).all()
+    
+    return {
+        "sessions": [
+            {
+                "id": s.id,
+                "listing_id": s.listing_id,
+                "status": s.status,
+                "conversations_analyzed": s.conversations_analyzed,
+                "messages_analyzed": s.messages_analyzed,
+                "entries_created": s.knowledge_entries_created,
+                "entries_updated": s.knowledge_entries_updated,
+                "error": s.error,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "completed_at": s.completed_at.isoformat() if s.completed_at else None
+            }
+            for s in sessions
+        ]
+    }
+
+
+@router.post("/knowledge/entry")
+async def create_knowledge_entry(entry: KnowledgeEntryCreate, db: Session = Depends(get_db)):
+    """Manually create a knowledge entry."""
+    from knowledge_base import PropertyKnowledge, KnowledgeType
+    
+    try:
+        knowledge_type = KnowledgeType(entry.knowledge_type)
+    except ValueError:
+        knowledge_type = KnowledgeType.general
+    
+    knowledge = PropertyKnowledge(
+        listing_id=entry.listing_id,
+        listing_name=entry.listing_name,
+        knowledge_type=knowledge_type,
+        title=entry.title,
+        content=entry.content,
+        question=entry.question,
+        answer=entry.answer,
+        source="manual",
+        confidence=1.0
+    )
+    db.add(knowledge)
+    db.commit()
+    db.refresh(knowledge)
+    
+    return {
+        "status": "created",
+        "id": knowledge.id
+    }
+
+
+@router.delete("/knowledge/entry/{entry_id}")
+async def delete_knowledge_entry(entry_id: int, db: Session = Depends(get_db)):
+    """Delete a knowledge entry."""
+    from knowledge_base import PropertyKnowledge
+    
+    entry = db.query(PropertyKnowledge).filter(PropertyKnowledge.id == entry_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    
+    db.delete(entry)
+    db.commit()
+    
+    return {"status": "deleted", "id": entry_id}
+
+
+@router.get("/knowledge/search")
+async def search_knowledge_base(
+    query: str,
+    listing_id: Optional[str] = None,
+    knowledge_type: Optional[str] = None,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    """Search the knowledge base."""
+    from knowledge_base import search_knowledge, KnowledgeType
+    
+    types = None
+    if knowledge_type:
+        try:
+            types = [KnowledgeType(knowledge_type)]
+        except ValueError:
+            pass
+    
+    results = search_knowledge(
+        query=query,
+        listing_id=listing_id,
+        knowledge_types=types,
+        top_k=limit
+    )
+    
+    return {"results": results, "query": query}
+
+
+# ============ GUEST HEALTH MONITORING ============
+
+class GuestHealthSettingCreate(BaseModel):
+    listing_id: str
+    listing_name: str
+    is_enabled: bool = True
+
+
+@router.get("/guest-health/settings")
+async def get_guest_health_settings(db: Session = Depends(get_db)):
+    """Get all guest health monitoring settings."""
+    from models import GuestHealthSettings
+    
+    settings_list = db.query(GuestHealthSettings).all()
+    
+    return {
+        "settings": [
+            {
+                "id": s.id,
+                "listing_id": s.listing_id,
+                "listing_name": s.listing_name,
+                "is_enabled": s.is_enabled,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None
+            }
+            for s in settings_list
+        ]
+    }
+
+
+@router.get("/guest-health/available-properties")
+async def get_available_properties_for_monitoring(db: Session = Depends(get_db)):
+    """Get all properties available for guest health monitoring."""
+    from models import GuestHealthSettings, Conversation
+    
+    # Get unique listings from CONVERSATIONS (not GuestIndex)
+    # This is important because Hostify uses different listing_ids in 
+    # reservations API vs inbox API - we need the inbox listing_ids
+    # since that's where the messages are
+    listings = db.query(
+        Conversation.listing_id,
+        Conversation.listing_name
+    ).filter(
+        Conversation.listing_id.isnot(None),
+        Conversation.listing_id != ""
+    ).distinct().all()
+    
+    # Also include listings from conversations
+    conv_listings = db.query(
+        Conversation.listing_id,
+        Conversation.listing_name
+    ).filter(
+        Conversation.listing_id.isnot(None),
+        Conversation.listing_id != ""
+    ).distinct().all()
+    
+    # Combine and dedupe
+    all_listings = {}
+    for lid, lname in listings + conv_listings:
+        if lid and lid not in all_listings:
+            all_listings[lid] = lname or lid
+    
+    # Check which are already monitored
+    monitored = db.query(GuestHealthSettings.listing_id).all()
+    monitored_ids = {m[0] for m in monitored}
+    
+    return {
+        "properties": [
+            {
+                "listing_id": lid,
+                "listing_name": lname,
+                "is_monitored": lid in monitored_ids
+            }
+            for lid, lname in all_listings.items()
+        ]
+    }
+
+
+@router.post("/guest-health/settings")
+async def add_guest_health_setting(
+    setting: GuestHealthSettingCreate,
+    db: Session = Depends(get_db)
+):
+    """Add a property to guest health monitoring."""
+    from models import GuestHealthSettings
+    
+    # Check if already exists
+    existing = db.query(GuestHealthSettings).filter(
+        GuestHealthSettings.listing_id == setting.listing_id
+    ).first()
+    
+    if existing:
+        # Update existing
+        existing.listing_name = setting.listing_name
+        existing.is_enabled = setting.is_enabled
+        db.commit()
+        return {
+            "status": "updated",
+            "id": existing.id,
+            "listing_id": existing.listing_id
+        }
+    
+    # Create new
+    new_setting = GuestHealthSettings(
+        listing_id=setting.listing_id,
+        listing_name=setting.listing_name,
+        is_enabled=setting.is_enabled
+    )
+    db.add(new_setting)
+    db.commit()
+    db.refresh(new_setting)
+    
+    return {
+        "status": "created",
+        "id": new_setting.id,
+        "listing_id": new_setting.listing_id
+    }
+
+
+@router.delete("/guest-health/settings/{listing_id}")
+async def remove_guest_health_setting(listing_id: str, db: Session = Depends(get_db)):
+    """Remove a property from guest health monitoring."""
+    from models import GuestHealthSettings
+    
+    setting = db.query(GuestHealthSettings).filter(
+        GuestHealthSettings.listing_id == listing_id
+    ).first()
+    
+    if not setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+    
+    db.delete(setting)
+    db.commit()
+    
+    return {"status": "deleted", "listing_id": listing_id}
+
+
+@router.post("/guest-health/settings/bulk")
+async def bulk_update_guest_health_settings(
+    listing_ids: List[str],
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk update guest health monitoring settings.
+    Enables monitoring for the provided listing_ids and disables all others.
+    """
+    from models import GuestHealthSettings
+    
+    # Get all current settings
+    current_settings = db.query(GuestHealthSettings).all()
+    current_ids = {s.listing_id for s in current_settings}
+    
+    # Get listing names for new properties (from Conversations, not GuestIndex)
+    # Hostify uses different listing_ids in reservations vs inbox API
+    listing_names = {}
+    listings = db.query(Conversation.listing_id, Conversation.listing_name).filter(
+        Conversation.listing_id.in_(listing_ids)
+    ).distinct().all()
+    for lid, lname in listings:
+        listing_names[lid] = lname
+    
+    # Add new settings
+    added = 0
+    for lid in listing_ids:
+        if lid not in current_ids:
+            new_setting = GuestHealthSettings(
+                listing_id=lid,
+                listing_name=listing_names.get(lid, lid),
+                is_enabled=True
+            )
+            db.add(new_setting)
+            added += 1
+    
+    # Remove settings not in the list
+    removed = 0
+    for setting in current_settings:
+        if setting.listing_id not in listing_ids:
+            db.delete(setting)
+            removed += 1
+    
+    db.commit()
+    
+    return {
+        "status": "updated",
+        "added": added,
+        "removed": removed,
+        "total_monitored": len(listing_ids)
+    }
+
+
+@router.get("/guest-health/guests")
+async def get_guest_health_data(db: Session = Depends(get_db)):
+    """Get guest health data for all checked-in guests at monitored properties."""
+    from guest_health import get_guest_health_summary
+    
+    guests = get_guest_health_summary(db)
+    
+    return {
+        "guests": guests,
+        "total": len(guests),
+        "needs_attention": len([g for g in guests if g["needs_attention"]]),
+        "at_risk": len([g for g in guests if g["risk_level"] in ["high", "critical"]])
+    }
+
+
+@router.post("/guest-health/refresh")
+async def refresh_guest_health(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Refresh guest health analysis for all monitored properties.
+    Fetches latest messages and runs AI analysis.
+    """
+    from guest_health import refresh_all_guest_health
+    
+    # Run in background for large portfolios
+    result = await refresh_all_guest_health(db)
+    
+    return result
+
+
+@router.get("/guest-health/guests/{reservation_id}")
+async def get_guest_health_detail(reservation_id: str, db: Session = Depends(get_db)):
+    """Get detailed guest health analysis for a specific reservation."""
+    from models import GuestHealthAnalysis
+    import json
+    
+    analysis = db.query(GuestHealthAnalysis).filter(
+        GuestHealthAnalysis.reservation_id == reservation_id
+    ).first()
+    
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Guest analysis not found")
+    
+    # Get messages for this guest
+    from guest_health import get_guest_messages
+    messages = get_guest_messages(db, reservation_id, analysis.guest_phone)
+    
+    return {
+        "analysis": {
+            "id": analysis.id,
+            "reservation_id": analysis.reservation_id,
+            "guest_name": analysis.guest_name,
+            "guest_phone": analysis.guest_phone,
+            "guest_email": analysis.guest_email,
+            "listing_id": analysis.listing_id,
+            "listing_name": analysis.listing_name,
+            "check_in_date": analysis.check_in_date.isoformat() if analysis.check_in_date else None,
+            "check_out_date": analysis.check_out_date.isoformat() if analysis.check_out_date else None,
+            "nights_stayed": analysis.nights_stayed,
+            "nights_remaining": analysis.nights_remaining,
+            "reservation_total": analysis.reservation_total,
+            "booking_source": analysis.booking_source,
+            "sentiment": analysis.sentiment.value if analysis.sentiment else "neutral",
+            "sentiment_score": analysis.sentiment_score,
+            "sentiment_reasoning": analysis.sentiment_reasoning,
+            "complaints": json.loads(analysis.complaints) if analysis.complaints else [],
+            "unresolved_issues": json.loads(analysis.unresolved_issues) if analysis.unresolved_issues else [],
+            "resolved_issues": json.loads(analysis.resolved_issues) if analysis.resolved_issues else [],
+            "total_messages": analysis.total_messages,
+            "guest_messages": analysis.guest_messages,
+            "avg_response_time_mins": analysis.avg_response_time_mins,
+            "last_message_at": analysis.last_message_at.isoformat() if analysis.last_message_at else None,
+            "last_message_from": analysis.last_message_from,
+            "risk_level": analysis.risk_level,
+            "needs_attention": analysis.needs_attention,
+            "attention_reason": analysis.attention_reason,
+            "recommended_actions": json.loads(analysis.recommended_actions) if analysis.recommended_actions else [],
+            "last_analyzed_at": analysis.last_analyzed_at.isoformat() if analysis.last_analyzed_at else None,
+            "conversation_id": analysis.conversation_id
+        },
+        "messages": messages
+    }
+
+
+@router.post("/guest-health/guests/{reservation_id}/refresh")
+async def refresh_single_guest_health(reservation_id: str, db: Session = Depends(get_db)):
+    """Refresh guest health analysis for a single guest."""
+    from guest_health import analyze_and_save_guest
+    
+    # Get the guest from GuestIndex
+    guest = db.query(GuestIndex).filter(
+        GuestIndex.reservation_id == reservation_id
+    ).first()
+    
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found")
+    
+    result = await analyze_and_save_guest(db, guest)
+    
+    if result:
+        return {
+            "status": "analyzed",
+            "reservation_id": reservation_id,
+            "sentiment": result.sentiment.value if result.sentiment else "neutral",
+            "risk_level": result.risk_level
+        }
+    else:
+        return {
+            "status": "error",
+            "message": "Failed to analyze guest"
+        }
+
+
+@router.get("/guest-health/stats")
+async def get_guest_health_stats(db: Session = Depends(get_db)):
+    """Get summary statistics for guest health monitoring."""
+    from models import GuestHealthSettings, GuestHealthAnalysis, SentimentLevel
+    
+    now = datetime.utcnow()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Count monitored properties
+    monitored_properties = db.query(GuestHealthSettings).filter(
+        GuestHealthSettings.is_enabled == True
+    ).count()
+    
+    # Get current analyses
+    analyses = db.query(GuestHealthAnalysis).filter(
+        GuestHealthAnalysis.check_out_date >= today
+    ).all()
+    
+    total_guests = len(analyses)
+    
+    # Count by sentiment
+    sentiment_counts = {
+        "very_unhappy": 0,
+        "unhappy": 0,
+        "neutral": 0,
+        "happy": 0,
+        "very_happy": 0
+    }
+    
+    for a in analyses:
+        sentiment_key = a.sentiment.value if a.sentiment else "neutral"
+        sentiment_counts[sentiment_key] = sentiment_counts.get(sentiment_key, 0) + 1
+    
+    # Count by risk level
+    risk_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0}
+    for a in analyses:
+        risk_counts[a.risk_level] = risk_counts.get(a.risk_level, 0) + 1
+    
+    # Count needing attention
+    needs_attention = len([a for a in analyses if a.needs_attention])
+    
+    # Count total unresolved issues
+    import json
+    total_unresolved = 0
+    for a in analyses:
+        if a.unresolved_issues:
+            try:
+                issues = json.loads(a.unresolved_issues)
+                total_unresolved += len(issues)
+            except:
+                pass
+    
+    return {
+        "monitored_properties": monitored_properties,
+        "total_checked_in_guests": total_guests,
+        "needs_attention": needs_attention,
+        "sentiment_breakdown": sentiment_counts,
+        "risk_breakdown": risk_counts,
+        "total_unresolved_issues": total_unresolved,
+        "at_risk_count": risk_counts.get("high", 0) + risk_counts.get("critical", 0)
+    }

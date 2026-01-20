@@ -61,11 +61,20 @@ function refreshView(viewName) {
         case 'guests':
             loadGuests();
             break;
+        case 'knowledge':
+            loadKnowledgeListings();
+            break;
         case 'logs':
             loadLogs();
             break;
         case 'config':
             loadConfig();
+            break;
+        case 'guest-health':
+            loadGuestHealth();
+            break;
+        case 'health-settings':
+            loadHealthSettings();
             break;
     }
 }
@@ -218,7 +227,14 @@ function formatDate(timestamp) {
 
 function formatTime(timestamp) {
     if (!timestamp) return '-';
-    const date = new Date(timestamp);
+    
+    // Server sends UTC timestamps without 'Z' suffix - add it so JS parses correctly
+    let ts = timestamp;
+    if (ts && !ts.endsWith('Z') && !ts.includes('+')) {
+        ts = ts + 'Z';
+    }
+    
+    const date = new Date(ts);
     if (isNaN(date.getTime())) return '-';
     
     const now = new Date();
@@ -230,7 +246,7 @@ function formatTime(timestamp) {
         return mins < 1 ? 'Just now' : `${mins}m ago`;
     }
     
-    // If today, show time
+    // If today, show time in local timezone
     if (date.toDateString() === now.toDateString()) {
         return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
@@ -327,66 +343,93 @@ async function selectConversation(id) {
                 </div>
             </div>
             <div class="messages-container">
-                ${conv.messages.map((msg, idx) => {
-                    const nextMsg = conv.messages[idx + 1];
-                    const hasAiSuggestion = msg.direction === 'inbound' && msg.ai_suggested_reply;
-                    const nextIsHostReply = nextMsg && nextMsg.direction === 'outbound';
+                ${(() => {
+                    // System messages that don't need responses
+                    const SYSTEM_MESSAGES = ['INQUIRY_CREATED', 'BOOKING_CONFIRMED', 'BOOKING_CANCELLED', 
+                                             'CHECK_IN_REMINDER', 'CHECK_OUT_REMINDER', 'REVIEW_REMINDER'];
+                    const isSystemMsg = (content) => SYSTEM_MESSAGES.includes((content || '').trim().toUpperCase());
                     
-                    return `
-                    <div class="message ${msg.direction}">
-                        <div class="message-sender">${msg.direction === 'inbound' ? '👤 Guest' : '🏠 Host'}</div>
-                        <div class="message-content">${escapeHtml(msg.content)}</div>
-                        <div class="message-meta">
-                            ${formatTime(msg.sent_at)}
-                            ${msg.ai_confidence ? ` • AI ${(msg.ai_confidence * 100).toFixed(0)}%` : ''}
-                            ${msg.was_auto_sent ? ' • Auto-sent' : ''}
-                            ${msg.was_human_edited ? ' • Edited' : ''}
-                        </div>
-                    </div>
-                    ${hasAiSuggestion && nextIsHostReply ? `
-                        <div class="ai-suggestion-inline">
-                            <div class="ai-suggestion-header">
-                                <span class="ai-label">🤖 AI Would Have Said</span>
-                                <span class="ai-confidence ${getConfidenceClass(msg.ai_suggestion_confidence)}">
-                                    ${msg.ai_suggestion_confidence ? (msg.ai_suggestion_confidence * 100).toFixed(0) + '%' : ''}
-                                </span>
+                    return conv.messages.map((msg, idx) => {
+                        const nextMsg = conv.messages[idx + 1];
+                        const hasAiSuggestion = msg.direction === 'inbound' && msg.ai_suggested_reply;
+                        const nextIsHostReply = nextMsg && nextMsg.direction === 'outbound';
+                        const nextIsSystemMsg = nextMsg && nextMsg.direction === 'inbound' && isSystemMsg(nextMsg.content);
+                        const isLastRealMsg = idx === conv.messages.length - 1 || 
+                                              (nextMsg && isSystemMsg(nextMsg.content) && !conv.messages.slice(idx + 1).some(m => m.direction === 'outbound'));
+                        
+                        return `
+                        <div class="message ${msg.direction}">
+                            <div class="message-sender">${msg.direction === 'inbound' ? '👤 Guest' : '🏠 Host'}</div>
+                            <div class="message-content">
+                                ${msg.attachment_url ? `<img src="${msg.attachment_url}" class="message-image" onclick="window.open('${msg.attachment_url}', '_blank')" alt="Attachment" style="max-width: 300px; max-height: 200px; border-radius: 8px; margin-bottom: 8px; cursor: pointer;" />` : ''}
+                                ${escapeHtml(msg.content || '')}
                             </div>
-                            <div class="ai-suggestion-text">${escapeHtml(msg.ai_suggested_reply)}</div>
-                            ${msg.ai_suggestion_reasoning ? `
-                                <div class="ai-suggestion-reasoning">${escapeHtml(msg.ai_suggestion_reasoning)}</div>
-                            ` : ''}
-                        </div>
-                    ` : ''}
-                    ${hasAiSuggestion && !nextIsHostReply && idx === conv.messages.length - 1 ? `
-                        <div class="ai-suggestion-inline pending">
-                            <div class="ai-suggestion-header">
-                                <span class="ai-label">🤖 AI Suggestion Ready</span>
-                                <span class="ai-confidence ${getConfidenceClass(msg.ai_suggestion_confidence)}">
-                                    ${msg.ai_suggestion_confidence ? (msg.ai_suggestion_confidence * 100).toFixed(0) + '%' : ''}
-                                </span>
-                            </div>
-                            <div class="ai-suggestion-text">${escapeHtml(msg.ai_suggested_reply)}</div>
-                            <div class="ai-suggestion-actions">
-                                <button class="btn btn-primary btn-sm" onclick="sendSuggestion(${conv.id}, '${escapeForJs(msg.ai_suggested_reply)}')">
-                                    ✅ Send
-                                </button>
-                                <button class="btn btn-secondary btn-sm" onclick="editSuggestion(${conv.id}, '${escapeForJs(msg.ai_suggested_reply)}')">
-                                    ✏️ Edit
-                                </button>
+                            <div class="message-meta">
+                                ${formatTime(msg.sent_at)}
+                                ${msg.ai_confidence ? ` • AI ${(msg.ai_confidence * 100).toFixed(0)}%` : ''}
+                                ${msg.was_auto_sent ? ' • Auto-sent' : ''}
+                                ${msg.was_human_edited ? ' • Edited' : ''}
                             </div>
                         </div>
-                    ` : ''}
-                `}).join('')}
+                        ${hasAiSuggestion && nextIsHostReply ? `
+                            <div class="ai-suggestion-inline">
+                                <div class="ai-suggestion-header">
+                                    <span class="ai-label">🤖 AI Would Have Said</span>
+                                    <span class="ai-confidence ${getConfidenceClass(msg.ai_suggestion_confidence)}">
+                                        ${msg.ai_suggestion_confidence ? (msg.ai_suggestion_confidence * 100).toFixed(0) + '%' : ''}
+                                    </span>
+                                </div>
+                                <div class="ai-suggestion-text">${escapeHtml(msg.ai_suggested_reply)}</div>
+                                ${msg.ai_suggestion_reasoning ? `
+                                    <div class="ai-suggestion-reasoning">${escapeHtml(msg.ai_suggestion_reasoning)}</div>
+                                ` : ''}
+                            </div>
+                        ` : ''}
+                        ${hasAiSuggestion && !nextIsHostReply && isLastRealMsg ? `
+                            <div class="ai-suggestion-inline pending">
+                                <div class="ai-suggestion-header">
+                                    <span class="ai-label">🤖 AI Suggestion Ready</span>
+                                    <span class="ai-confidence ${getConfidenceClass(msg.ai_suggestion_confidence)}">
+                                        ${msg.ai_suggestion_confidence ? (msg.ai_suggestion_confidence * 100).toFixed(0) + '%' : ''}
+                                    </span>
+                                </div>
+                                <div class="ai-suggestion-text">${escapeHtml(msg.ai_suggested_reply)}</div>
+                                <div class="ai-suggestion-actions">
+                                    <button class="btn btn-primary btn-sm" onclick="sendSuggestion(${conv.id}, '${escapeForJs(msg.ai_suggested_reply)}')">
+                                        ✅ Send
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm" onclick="editSuggestion(${conv.id}, '${escapeForJs(msg.ai_suggested_reply)}')">
+                                        ✏️ Edit
+                                    </button>
+                                </div>
+                            </div>
+                        ` : ''}
+                    `}).join('');
+                })()}
             </div>
             
             ${(() => {
-                // Check if last guest message has an AI suggestion
-                const lastGuestMsg = [...conv.messages].reverse().find(m => m.direction === 'inbound');
-                const lastMsgIsGuest = conv.messages.length > 0 && conv.messages[conv.messages.length - 1].direction === 'inbound';
-                const hasStoredSuggestion = lastGuestMsg && lastGuestMsg.ai_suggested_reply;
+                // System messages that don't need responses
+                const SYSTEM_MESSAGES = ['INQUIRY_CREATED', 'BOOKING_CONFIRMED', 'BOOKING_CANCELLED', 
+                                         'CHECK_IN_REMINDER', 'CHECK_OUT_REMINDER', 'REVIEW_REMINDER'];
                 
-                // Only show panel if we need a response AND there's no stored suggestion
-                if (lastMsgIsGuest && !hasStoredSuggestion) {
+                // Filter out system messages to find real guest messages
+                const realGuestMsgs = conv.messages.filter(m => 
+                    m.direction === 'inbound' && 
+                    !SYSTEM_MESSAGES.includes((m.content || '').trim().toUpperCase())
+                );
+                
+                // Check if the last real guest message needs a response
+                const lastRealGuestMsg = [...realGuestMsgs].reverse()[0];
+                const lastMsgIsGuest = conv.messages.length > 0 && conv.messages[conv.messages.length - 1].direction === 'inbound';
+                const lastMsgIsSystemMsg = lastMsgIsGuest && SYSTEM_MESSAGES.includes((conv.messages[conv.messages.length - 1].content || '').trim().toUpperCase());
+                
+                // Has AI suggestion for any unanswered guest message
+                const hasStoredSuggestion = lastRealGuestMsg && lastRealGuestMsg.ai_suggested_reply;
+                
+                // Show panel only if real guest is waiting AND no AI suggestion exists yet
+                // (Don't show for system messages like INQUIRY_CREATED)
+                if (lastRealGuestMsg && !hasStoredSuggestion && !lastMsgIsSystemMsg) {
                     return `
                         <div class="suggestion-panel" id="suggestion-panel-${conv.id}">
                             <div class="suggestion-header">
@@ -394,9 +437,10 @@ async function selectConversation(id) {
                                 <span class="suggestion-title">AI Suggested Response</span>
                             </div>
                             <div class="suggestion-empty">
-                                <p>💬 Guest is waiting for a response</p>
-                                <button class="btn btn-primary" onclick="generateSuggestionAndSave(${conv.id})">
-                                    🤖 Generate AI Suggestion
+                                <p>⏳ Waiting for AI suggestion...</p>
+                                <p class="help-text">AI suggestions are generated automatically when messages arrive via webhook.</p>
+                                <button class="btn btn-secondary" onclick="generateSuggestionAndSave(${conv.id})">
+                                    Generate Now
                                 </button>
                             </div>
                         </div>
@@ -937,4 +981,904 @@ function truncate(str, len) {
     if (!str) return '';
     if (str.length <= len) return str;
     return str.substring(0, len) + '...';
+}
+
+
+// ============ PROPERTY KNOWLEDGE BASE ============
+
+let selectedKnowledgeListing = null;
+
+async function loadKnowledgeListings() {
+    const list = document.getElementById('knowledge-list');
+    const countEl = document.getElementById('knowledge-listing-count');
+    
+    list.innerHTML = '<div class="loading">Loading properties...</div>';
+    
+    try {
+        const data = await apiGet('/knowledge/listings');
+        const listings = data.listings || [];
+        
+        countEl.textContent = `${listings.length} properties`;
+        
+        if (listings.length === 0) {
+            list.innerHTML = `
+                <div class="empty-state small">
+                    <p>No properties found</p>
+                    <p class="help-text">Conversations will appear here as they come in</p>
+                </div>
+            `;
+            return;
+        }
+        
+        // Sort: properties with knowledge first, then by name
+        listings.sort((a, b) => {
+            if (a.knowledge_count !== b.knowledge_count) {
+                return b.knowledge_count - a.knowledge_count;
+            }
+            return (a.listing_name || '').localeCompare(b.listing_name || '');
+        });
+        
+        list.innerHTML = listings.map(l => `
+            <div class="knowledge-listing-item ${selectedKnowledgeListing === l.listing_id ? 'selected' : ''}" 
+                 onclick="selectKnowledgeListing('${l.listing_id}', '${escapeForJs(l.listing_name || '')}')">
+                <div class="listing-name">${escapeHtml(l.listing_name || 'Unknown Property')}</div>
+                <div class="listing-stats">
+                    ${l.knowledge_count > 0 ? `<span class="badge knowledge">${l.knowledge_count} entries</span>` : ''}
+                    ${l.file_count > 0 ? `<span class="badge files">${l.file_count} files</span>` : ''}
+                    ${l.knowledge_count === 0 && l.file_count === 0 ? '<span class="badge empty">No data</span>' : ''}
+                </div>
+            </div>
+        `).join('');
+        
+    } catch (error) {
+        list.innerHTML = `<div class="error">Failed to load: ${error.message}</div>`;
+    }
+}
+
+async function selectKnowledgeListing(listingId, listingName) {
+    selectedKnowledgeListing = listingId;
+    
+    // Update selection in list
+    document.querySelectorAll('.knowledge-listing-item').forEach(el => {
+        el.classList.remove('selected');
+    });
+    event.currentTarget.classList.add('selected');
+    
+    const detail = document.getElementById('knowledge-detail');
+    detail.innerHTML = '<div class="loading">Loading knowledge...</div>';
+    
+    try {
+        const data = await apiGet(`/knowledge/${listingId}`);
+        
+        const byType = data.by_type || {};
+        const entries = data.entries || [];
+        const files = data.files || [];
+        
+        detail.innerHTML = `
+            <div class="knowledge-property-header">
+                <h2>${escapeHtml(listingName || data.listing_name || 'Property')}</h2>
+                <div class="knowledge-summary">
+                    <span>${data.total_entries || 0} knowledge entries</span>
+                    <span>•</span>
+                    <span>${files.length} files uploaded</span>
+                </div>
+            </div>
+            
+            <div class="knowledge-actions">
+                <div class="upload-section">
+                    <h3>📤 Upload Property Documents</h3>
+                    <p class="help-text">Upload PDFs, Word docs, or text files with property information</p>
+                    <form id="upload-form" onsubmit="uploadPropertyFile(event, '${listingId}', '${escapeForJs(listingName)}')">
+                        <input type="file" id="file-input" accept=".pdf,.docx,.doc,.txt,.md,.json" required>
+                        <button type="submit" class="btn btn-primary">Upload & Process</button>
+                    </form>
+                    <div id="upload-status"></div>
+                </div>
+                
+                <div class="learn-section">
+                    <h3>🧠 AI Learning</h3>
+                    <p class="help-text">Let AI analyze past conversations to extract knowledge</p>
+                    <button class="btn btn-secondary" onclick="triggerLearningForProperty('${listingId}')">
+                        Learn from This Property's Messages
+                    </button>
+                </div>
+            </div>
+            
+            ${files.length > 0 ? `
+                <div class="knowledge-section">
+                    <h3>📁 Uploaded Files</h3>
+                    <div class="files-list">
+                        ${files.map(f => `
+                            <div class="file-item ${f.processed ? 'processed' : 'pending'}">
+                                <span class="file-icon">${getFileIcon(f.file_type)}</span>
+                                <span class="file-name">${escapeHtml(f.filename)}</span>
+                                <span class="file-status">
+                                    ${f.processed 
+                                        ? `✅ ${f.entries_created} entries extracted` 
+                                        : '⏳ Processing...'}
+                                </span>
+                                ${!f.processed ? `
+                                    <button class="btn btn-small" onclick="processFile('${listingId}', ${f.id})">
+                                        Process Now
+                                    </button>
+                                ` : ''}
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            
+            <div class="knowledge-section">
+                <div class="section-header">
+                    <h3>📖 Knowledge Entries</h3>
+                    <button class="btn btn-small btn-primary" onclick="showAddKnowledgeForm('${listingId}', '${escapeForJs(listingName)}')">
+                        + Add Entry
+                    </button>
+                </div>
+                
+                ${entries.length === 0 ? `
+                    <div class="empty-state small">
+                        <p>No knowledge entries yet</p>
+                        <p class="help-text">Upload documents or use AI learning to add knowledge</p>
+                    </div>
+                ` : `
+                    <div class="knowledge-type-filter">
+                        <button class="chip active" onclick="filterKnowledgeEntries('all')">All (${entries.length})</button>
+                        ${Object.entries(byType).map(([type, count]) => `
+                            <button class="chip" onclick="filterKnowledgeEntries('${type}')">${formatKnowledgeType(type)} (${count})</button>
+                        `).join('')}
+                    </div>
+                    
+                    <div class="knowledge-entries" id="knowledge-entries">
+                        ${entries.map(e => `
+                            <div class="knowledge-entry" data-type="${e.type}">
+                                <div class="entry-header">
+                                    <span class="entry-type ${e.type}">${formatKnowledgeType(e.type)}</span>
+                                    <span class="entry-title">${escapeHtml(e.title)}</span>
+                                    <span class="entry-source">${e.source}</span>
+                                    <button class="btn-icon" onclick="deleteKnowledgeEntry(${e.id})" title="Delete">🗑️</button>
+                                </div>
+                                <div class="entry-content">${escapeHtml(e.content)}</div>
+                                ${e.times_used > 0 ? `<div class="entry-usage">Used ${e.times_used} times</div>` : ''}
+                            </div>
+                        `).join('')}
+                    </div>
+                `}
+            </div>
+        `;
+        
+    } catch (error) {
+        detail.innerHTML = `<div class="error">Failed to load: ${error.message}</div>`;
+    }
+}
+
+function getFileIcon(fileType) {
+    const icons = {
+        'pdf': '📕',
+        'docx': '📘',
+        'doc': '📘',
+        'txt': '📄',
+        'md': '📝',
+        'json': '📋'
+    };
+    return icons[fileType] || '📄';
+}
+
+function formatKnowledgeType(type) {
+    const names = {
+        'amenity': '🏊 Amenity',
+        'house_rule': '📋 House Rule',
+        'local_recommendation': '📍 Local',
+        'appliance_guide': '🔧 Appliance',
+        'common_issue': '⚠️ Issue',
+        'faq': '❓ FAQ',
+        'general': '📝 General'
+    };
+    return names[type] || type;
+}
+
+function filterKnowledgeEntries(type) {
+    // Update active chip
+    document.querySelectorAll('.knowledge-type-filter .chip').forEach(chip => {
+        chip.classList.remove('active');
+    });
+    event.currentTarget.classList.add('active');
+    
+    // Filter entries
+    document.querySelectorAll('.knowledge-entry').forEach(entry => {
+        if (type === 'all' || entry.dataset.type === type) {
+            entry.style.display = 'block';
+        } else {
+            entry.style.display = 'none';
+        }
+    });
+}
+
+async function uploadPropertyFile(event, listingId, listingName) {
+    event.preventDefault();
+    
+    const fileInput = document.getElementById('file-input');
+    const statusEl = document.getElementById('upload-status');
+    
+    if (!fileInput.files.length) {
+        statusEl.innerHTML = '<div class="error">Please select a file</div>';
+        return;
+    }
+    
+    const file = fileInput.files[0];
+    statusEl.innerHTML = '<div class="info">Uploading...</div>';
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('listing_name', listingName);
+    
+    try {
+        const response = await fetch(`/api/admin/knowledge/${listingId}/upload`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (result.status === 'uploaded') {
+            statusEl.innerHTML = `<div class="success">✅ ${result.message}</div>`;
+            // Reload the property view
+            setTimeout(() => selectKnowledgeListing(listingId, listingName), 2000);
+        } else if (result.status === 'duplicate') {
+            statusEl.innerHTML = `<div class="warning">⚠️ ${result.message}</div>`;
+        } else {
+            statusEl.innerHTML = `<div class="error">❌ ${result.error || 'Upload failed'}</div>`;
+        }
+    } catch (error) {
+        statusEl.innerHTML = `<div class="error">❌ ${error.message}</div>`;
+    }
+}
+
+async function processFile(listingId, fileId) {
+    try {
+        const result = await apiPost(`/knowledge/${listingId}/process/${fileId}`);
+        
+        if (result.success) {
+            alert(`✅ Extracted ${result.entries_created} knowledge entries!`);
+            // Reload
+            loadKnowledgeListings();
+            if (selectedKnowledgeListing) {
+                selectKnowledgeListing(selectedKnowledgeListing, '');
+            }
+        } else {
+            alert(`❌ Error: ${result.error}`);
+        }
+    } catch (error) {
+        alert(`❌ Error: ${error.message}`);
+    }
+}
+
+async function triggerLearning() {
+    if (!confirm('This will analyze all conversations to extract knowledge. This may take a few minutes and use API credits. Continue?')) {
+        return;
+    }
+    
+    try {
+        const result = await apiPost('/knowledge/learn');
+        
+        if (result.status === 'started') {
+            alert('✅ Learning started in background. Refresh in a few minutes to see results.');
+        } else if (result.status === 'already_running') {
+            alert('⚠️ A learning session is already running. Please wait.');
+        } else if (result.success) {
+            alert(`✅ Learning complete!\n\nConversations analyzed: ${result.conversations_analyzed}\nNew entries: ${result.entries_created}\nUpdated entries: ${result.entries_updated}`);
+            loadKnowledgeListings();
+        } else {
+            alert(`❌ Error: ${result.error}`);
+        }
+    } catch (error) {
+        alert(`❌ Error: ${error.message}`);
+    }
+}
+
+async function triggerLearningForProperty(listingId) {
+    if (!confirm('Analyze this property\'s conversations to extract knowledge?')) {
+        return;
+    }
+    
+    try {
+        const result = await apiPost(`/knowledge/learn?listing_id=${listingId}`);
+        
+        if (result.status === 'started') {
+            alert('✅ Learning started. Refresh in a moment to see results.');
+        } else if (result.success) {
+            alert(`✅ Learning complete!\n\nMessages analyzed: ${result.messages_analyzed}\nNew entries: ${result.entries_created}`);
+            selectKnowledgeListing(listingId, '');
+        } else {
+            alert(`❌ Error: ${result.error}`);
+        }
+    } catch (error) {
+        alert(`❌ Error: ${error.message}`);
+    }
+}
+
+async function deleteKnowledgeEntry(entryId) {
+    if (!confirm('Delete this knowledge entry?')) {
+        return;
+    }
+    
+    try {
+        await apiDelete(`/knowledge/entry/${entryId}`);
+        // Reload current property
+        if (selectedKnowledgeListing) {
+            selectKnowledgeListing(selectedKnowledgeListing, '');
+        }
+    } catch (error) {
+        alert(`❌ Error: ${error.message}`);
+    }
+}
+
+function showAddKnowledgeForm(listingId, listingName) {
+    const detail = document.getElementById('knowledge-detail');
+    
+    const formHtml = `
+        <div class="add-knowledge-form">
+            <h2>Add Knowledge Entry</h2>
+            <p class="help-text">Manually add knowledge about ${escapeHtml(listingName)}</p>
+            
+            <form onsubmit="submitKnowledgeEntry(event, '${listingId}', '${escapeForJs(listingName)}')">
+                <div class="form-group">
+                    <label>Type</label>
+                    <select id="new-knowledge-type" required>
+                        <option value="amenity">🏊 Amenity</option>
+                        <option value="house_rule">📋 House Rule</option>
+                        <option value="local_recommendation">📍 Local Recommendation</option>
+                        <option value="appliance_guide">🔧 Appliance Guide</option>
+                        <option value="common_issue">⚠️ Common Issue</option>
+                        <option value="faq" selected>❓ FAQ</option>
+                        <option value="general">📝 General</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>Title</label>
+                    <input type="text" id="new-knowledge-title" placeholder="e.g., Pool Hours" required>
+                </div>
+                
+                <div class="form-group">
+                    <label>Content</label>
+                    <textarea id="new-knowledge-content" rows="3" placeholder="Detailed information..." required></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label>Common Question (optional)</label>
+                    <input type="text" id="new-knowledge-question" placeholder="e.g., What are the pool hours?">
+                </div>
+                
+                <div class="form-group">
+                    <label>Answer (optional)</label>
+                    <textarea id="new-knowledge-answer" rows="2" placeholder="The answer to give guests..."></textarea>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="selectKnowledgeListing('${listingId}', '${escapeForJs(listingName)}')">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Entry</button>
+                </div>
+            </form>
+        </div>
+    `;
+    
+    detail.innerHTML = formHtml;
+}
+
+async function submitKnowledgeEntry(event, listingId, listingName) {
+    event.preventDefault();
+    
+    const entry = {
+        listing_id: listingId,
+        listing_name: listingName,
+        knowledge_type: document.getElementById('new-knowledge-type').value,
+        title: document.getElementById('new-knowledge-title').value,
+        content: document.getElementById('new-knowledge-content').value,
+        question: document.getElementById('new-knowledge-question').value || null,
+        answer: document.getElementById('new-knowledge-answer').value || null
+    };
+    
+    try {
+        const result = await apiPost('/knowledge/entry', entry);
+        
+        if (result.status === 'created') {
+            alert('✅ Knowledge entry added!');
+            selectKnowledgeListing(listingId, listingName);
+        } else {
+            alert(`❌ Error: ${result.error}`);
+        }
+    } catch (error) {
+        alert(`❌ Error: ${error.message}`);
+    }
+}
+
+async function apiDelete(endpoint) {
+    const response = await fetch(`/api/admin${endpoint}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+    });
+    return response.json();
+}
+
+
+// ============ GUEST HEALTH MONITOR ============
+
+let guestHealthData = [];
+
+async function loadGuestHealth() {
+    await loadGuestHealthStats();
+    await loadGuestHealthList();
+}
+
+async function loadGuestHealthStats() {
+    try {
+        const stats = await apiGet('/guest-health/stats');
+        
+        document.getElementById('health-stat-total').textContent = stats.total_checked_in_guests || 0;
+        document.getElementById('health-stat-attention').textContent = stats.needs_attention || 0;
+        document.getElementById('health-stat-risk').textContent = stats.at_risk_count || 0;
+        document.getElementById('health-stat-issues').textContent = stats.total_unresolved_issues || 0;
+    } catch (error) {
+        console.error('Failed to load guest health stats:', error);
+    }
+}
+
+async function loadGuestHealthList() {
+    const container = document.getElementById('health-guests-container');
+    
+    try {
+        const data = await apiGet('/guest-health/guests');
+        guestHealthData = data.guests || [];
+        
+        if (guestHealthData.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <span class="empty-icon">💚</span>
+                    <p>No guest health data available</p>
+                    <p class="help-text">Make sure you have properties configured in Health Settings and guests currently checked in.</p>
+                    <button class="btn btn-primary" onclick="switchView('health-settings')">Configure Properties</button>
+                </div>
+            `;
+            return;
+        }
+        
+        renderGuestHealthList(guestHealthData);
+    } catch (error) {
+        container.innerHTML = `<div class="error">Failed to load guest health data: ${error.message}</div>`;
+    }
+}
+
+function renderGuestHealthList(guests) {
+    const container = document.getElementById('health-guests-container');
+    
+    container.innerHTML = guests.map(g => `
+        <div class="health-guest-card ${g.needs_attention ? 'attention' : ''} ${g.risk_level}" onclick="showGuestHealthDetail('${g.reservation_id}')">
+            <div class="health-guest-header">
+                <div class="health-guest-info">
+                    <span class="health-guest-name">${escapeHtml(g.guest_name || 'Guest')}</span>
+                    <span class="health-guest-property">${escapeHtml(g.listing_name || '')}</span>
+                </div>
+                <div class="health-badges">
+                    ${g.needs_attention ? '<span class="badge attention-badge">⚠️ Needs Attention</span>' : ''}
+                    <span class="badge risk-badge ${g.risk_level}">${g.risk_level.toUpperCase()}</span>
+                </div>
+            </div>
+            
+            <div class="health-sentiment-row">
+                <div class="sentiment-indicator ${g.sentiment}">
+                    ${getSentimentIcon(g.sentiment)}
+                    <span class="sentiment-label">${formatSentiment(g.sentiment)}</span>
+                </div>
+                <div class="sentiment-score" style="color: ${getSentimentColor(g.sentiment_score)}">
+                    ${g.sentiment_score !== null ? (g.sentiment_score > 0 ? '+' : '') + g.sentiment_score.toFixed(2) : 'N/A'}
+                </div>
+            </div>
+            
+            <div class="health-guest-details">
+                <div class="detail-row">
+                    <span class="detail-label">📅 Stay:</span>
+                    <span class="detail-value">${formatDate(g.check_in_date)} → ${formatDate(g.check_out_date)}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">🌙 Progress:</span>
+                    <span class="detail-value">${g.nights_stayed || 0} nights stayed, ${g.nights_remaining || 0} remaining</span>
+                </div>
+                ${g.booking_source ? `
+                    <div class="detail-row">
+                        <span class="detail-label">📱 Source:</span>
+                        <span class="detail-value source-badge ${(g.booking_source || '').toLowerCase()}">${g.booking_source}</span>
+                    </div>
+                ` : ''}
+                <div class="detail-row">
+                    <span class="detail-label">💬 Messages:</span>
+                    <span class="detail-value">${g.total_messages || 0} total (${g.guest_messages || 0} from guest)</span>
+                </div>
+            </div>
+            
+            ${g.complaints && g.complaints.length > 0 ? `
+                <div class="health-complaints">
+                    <span class="complaints-label">Issues (${g.complaints.length}):</span>
+                    <div class="complaints-list">
+                        ${g.complaints.slice(0, 3).map(c => `
+                            <span class="complaint-tag ${c.severity}">
+                                ${getDepartmentIcon(c.department)} ${escapeHtml(c.issue.substring(0, 40))}${c.issue.length > 40 ? '...' : ''}
+                            </span>
+                        `).join('')}
+                        ${g.complaints.length > 3 ? `<span class="more-tag">+${g.complaints.length - 3} more</span>` : ''}
+                    </div>
+                </div>
+            ` : ''}
+            
+            ${g.attention_reason ? `
+                <div class="health-attention-reason">
+                    <strong>⚠️</strong> ${escapeHtml(g.attention_reason)}
+                </div>
+            ` : ''}
+            
+            <div class="health-guest-footer">
+                <span class="last-analyzed">Last analyzed: ${formatTime(g.last_analyzed_at)}</span>
+                <button class="btn btn-small btn-secondary" onclick="event.stopPropagation(); refreshSingleGuest('${g.reservation_id}')">🔄 Refresh</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function getSentimentIcon(sentiment) {
+    const icons = {
+        'very_unhappy': '😡',
+        'unhappy': '😞',
+        'neutral': '😐',
+        'happy': '🙂',
+        'very_happy': '😊'
+    };
+    return icons[sentiment] || '😐';
+}
+
+function formatSentiment(sentiment) {
+    const labels = {
+        'very_unhappy': 'Very Unhappy',
+        'unhappy': 'Unhappy',
+        'neutral': 'Neutral',
+        'happy': 'Happy',
+        'very_happy': 'Very Happy'
+    };
+    return labels[sentiment] || 'Neutral';
+}
+
+function getSentimentColor(score) {
+    if (score === null) return 'var(--text-tertiary)';
+    if (score <= -0.5) return '#ef4444';
+    if (score < 0) return '#f97316';
+    if (score === 0) return 'var(--text-secondary)';
+    if (score < 0.5) return '#84cc16';
+    return '#22c55e';
+}
+
+function getDepartmentIcon(department) {
+    const icons = {
+        'housekeeping': '🧹',
+        'maintenance': '🔧',
+        'amenities': '🏊',
+        'communication': '📞',
+        'billing': '💳',
+        'noise': '🔊',
+        'safety': '🔒',
+        'check_in': '🔑',
+        'property_condition': '🏠'
+    };
+    return icons[department] || '📋';
+}
+
+function filterGuestHealth() {
+    const sentimentFilter = document.getElementById('health-filter-sentiment').value;
+    const riskFilter = document.getElementById('health-filter-risk').value;
+    const attentionFilter = document.getElementById('health-filter-attention').checked;
+    
+    let filtered = guestHealthData;
+    
+    if (sentimentFilter) {
+        filtered = filtered.filter(g => g.sentiment === sentimentFilter);
+    }
+    
+    if (riskFilter) {
+        filtered = filtered.filter(g => g.risk_level === riskFilter);
+    }
+    
+    if (attentionFilter) {
+        filtered = filtered.filter(g => g.needs_attention);
+    }
+    
+    renderGuestHealthList(filtered);
+}
+
+async function refreshGuestHealth() {
+    const container = document.getElementById('health-guests-container');
+    container.innerHTML = `
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>Analyzing guests... This may take a moment.</p>
+        </div>
+    `;
+    
+    try {
+        const result = await apiPost('/guest-health/refresh');
+        
+        if (result.status === 'no_properties') {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <span class="empty-icon">⚙️</span>
+                    <p>${result.message}</p>
+                    <button class="btn btn-primary" onclick="switchView('health-settings')">Configure Properties</button>
+                </div>
+            `;
+            return;
+        }
+        
+        await loadGuestHealth();
+    } catch (error) {
+        container.innerHTML = `<div class="error">Failed to refresh: ${error.message}</div>`;
+    }
+}
+
+async function refreshSingleGuest(reservationId) {
+    try {
+        await apiPost(`/guest-health/guests/${reservationId}/refresh`);
+        await loadGuestHealth();
+    } catch (error) {
+        alert('Failed to refresh guest: ' + error.message);
+    }
+}
+
+async function showGuestHealthDetail(reservationId) {
+    const panel = document.getElementById('health-detail-panel');
+    const content = document.getElementById('health-detail-content');
+    
+    panel.style.display = 'block';
+    content.innerHTML = '<div class="loading">Loading guest details...</div>';
+    
+    try {
+        const data = await apiGet(`/guest-health/guests/${reservationId}`);
+        const a = data.analysis;
+        const messages = data.messages || [];
+        
+        content.innerHTML = `
+            <div class="health-detail-header">
+                <div class="detail-close" onclick="closeGuestHealthDetail()">×</div>
+                <h2>${escapeHtml(a.guest_name || 'Guest')}</h2>
+                <p class="detail-property">${escapeHtml(a.listing_name || '')}</p>
+            </div>
+            
+            <div class="health-detail-summary">
+                <div class="summary-card sentiment ${a.sentiment}">
+                    <span class="summary-icon">${getSentimentIcon(a.sentiment)}</span>
+                    <div class="summary-info">
+                        <span class="summary-label">Sentiment</span>
+                        <span class="summary-value">${formatSentiment(a.sentiment)}</span>
+                    </div>
+                </div>
+                <div class="summary-card risk ${a.risk_level}">
+                    <span class="summary-icon">⚠️</span>
+                    <div class="summary-info">
+                        <span class="summary-label">Risk Level</span>
+                        <span class="summary-value">${a.risk_level.toUpperCase()}</span>
+                    </div>
+                </div>
+            </div>
+            
+            ${a.sentiment_reasoning ? `
+                <div class="detail-section">
+                    <h3>AI Assessment</h3>
+                    <p class="reasoning-text">${escapeHtml(a.sentiment_reasoning)}</p>
+                </div>
+            ` : ''}
+            
+            <div class="detail-section">
+                <h3>Stay Details</h3>
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <span class="label">Check-in</span>
+                        <span class="value">${formatDate(a.check_in_date)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="label">Check-out</span>
+                        <span class="value">${formatDate(a.check_out_date)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="label">Nights Stayed</span>
+                        <span class="value">${a.nights_stayed || 0}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="label">Nights Remaining</span>
+                        <span class="value">${a.nights_remaining || 0}</span>
+                    </div>
+                    ${a.booking_source ? `
+                        <div class="detail-item">
+                            <span class="label">Booking Source</span>
+                            <span class="value">${a.booking_source}</span>
+                        </div>
+                    ` : ''}
+                    ${a.guest_phone ? `
+                        <div class="detail-item">
+                            <span class="label">Phone</span>
+                            <span class="value">${a.guest_phone}</span>
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+            
+            ${a.complaints && a.complaints.length > 0 ? `
+                <div class="detail-section">
+                    <h3>Complaints & Issues (${a.complaints.length})</h3>
+                    <div class="complaints-detail-list">
+                        ${a.complaints.map(c => `
+                            <div class="complaint-detail-item ${c.severity}">
+                                <div class="complaint-header">
+                                    <span class="complaint-dept">${getDepartmentIcon(c.department)} ${c.department}</span>
+                                    <span class="complaint-severity ${c.severity}">${c.severity}</span>
+                                    <span class="complaint-status ${c.status}">${c.status}</span>
+                                </div>
+                                <p class="complaint-text">${escapeHtml(c.issue)}</p>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            
+            ${a.recommended_actions && a.recommended_actions.length > 0 ? `
+                <div class="detail-section">
+                    <h3>Recommended Actions</h3>
+                    <div class="actions-list">
+                        ${a.recommended_actions.map(act => `
+                            <div class="action-item ${act.priority}">
+                                <span class="action-priority">${act.priority.toUpperCase()}</span>
+                                <div class="action-content">
+                                    <p class="action-text">${escapeHtml(act.action)}</p>
+                                    ${act.reason ? `<p class="action-reason">${escapeHtml(act.reason)}</p>` : ''}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            
+            <div class="detail-section">
+                <h3>Message History (${messages.length})</h3>
+                <div class="detail-messages">
+                    ${messages.length === 0 ? '<p class="no-messages">No messages exchanged yet.</p>' : ''}
+                    ${messages.slice(-20).map(m => `
+                        <div class="detail-message ${m.direction === 'inbound' ? 'guest' : 'host'}">
+                            <span class="message-role">${m.direction === 'inbound' ? '👤 Guest' : '🏠 Host'}</span>
+                            <p class="message-text">${escapeHtml(m.content)}</p>
+                            <span class="message-time">${formatTime(m.sent_at)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+            
+            <div class="detail-footer">
+                <span>Last analyzed: ${formatTime(a.last_analyzed_at)}</span>
+                <button class="btn btn-primary" onclick="refreshSingleGuest('${a.reservation_id}'); showGuestHealthDetail('${a.reservation_id}');">
+                    🔄 Re-analyze
+                </button>
+            </div>
+        `;
+    } catch (error) {
+        content.innerHTML = `<div class="error">Failed to load guest details: ${error.message}</div>`;
+    }
+}
+
+function closeGuestHealthDetail() {
+    document.getElementById('health-detail-panel').style.display = 'none';
+}
+
+
+// ============ HEALTH SETTINGS ============
+
+let availableProperties = [];
+let selectedPropertyIds = new Set();
+
+async function loadHealthSettings() {
+    await loadAvailableProperties();
+}
+
+async function loadAvailableProperties() {
+    const container = document.getElementById('property-list-container');
+    
+    try {
+        // Get available properties
+        const availableData = await apiGet('/guest-health/available-properties');
+        availableProperties = availableData.properties || [];
+        
+        // Get current settings
+        const settingsData = await apiGet('/guest-health/settings');
+        const currentSettings = settingsData.settings || [];
+        selectedPropertyIds = new Set(currentSettings.map(s => s.listing_id));
+        
+        if (availableProperties.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state small">
+                    <span class="empty-icon">🏠</span>
+                    <p>No properties found</p>
+                    <p class="help-text">Properties will appear here once you sync reservations.</p>
+                </div>
+            `;
+            return;
+        }
+        
+        renderPropertyList();
+        updateSelectedCount();
+    } catch (error) {
+        container.innerHTML = `<div class="error">Failed to load properties: ${error.message}</div>`;
+    }
+}
+
+function renderPropertyList() {
+    const container = document.getElementById('property-list-container');
+    
+    container.innerHTML = `
+        <div class="property-selection-list">
+            ${availableProperties.map(p => `
+                <label class="property-checkbox-item ${selectedPropertyIds.has(p.listing_id) ? 'selected' : ''}">
+                    <input type="checkbox" 
+                           value="${p.listing_id}" 
+                           ${selectedPropertyIds.has(p.listing_id) ? 'checked' : ''}
+                           onchange="toggleProperty('${p.listing_id}', this.checked)">
+                    <div class="property-info">
+                        <span class="property-name">${escapeHtml(p.listing_name || p.listing_id)}</span>
+                        <span class="property-id">${p.listing_id}</span>
+                    </div>
+                    <span class="checkmark">✓</span>
+                </label>
+            `).join('')}
+        </div>
+    `;
+}
+
+function toggleProperty(listingId, isChecked) {
+    if (isChecked) {
+        selectedPropertyIds.add(listingId);
+    } else {
+        selectedPropertyIds.delete(listingId);
+    }
+    
+    // Update visual state
+    const item = document.querySelector(`input[value="${listingId}"]`).closest('.property-checkbox-item');
+    item.classList.toggle('selected', isChecked);
+    
+    updateSelectedCount();
+}
+
+function selectAllProperties() {
+    availableProperties.forEach(p => selectedPropertyIds.add(p.listing_id));
+    renderPropertyList();
+    updateSelectedCount();
+}
+
+function deselectAllProperties() {
+    selectedPropertyIds.clear();
+    renderPropertyList();
+    updateSelectedCount();
+}
+
+function updateSelectedCount() {
+    document.getElementById('selected-count').textContent = `${selectedPropertyIds.size} properties selected`;
+}
+
+async function saveHealthSettings() {
+    const listingIds = Array.from(selectedPropertyIds);
+    
+    try {
+        const result = await apiPost('/guest-health/settings/bulk', listingIds);
+        
+        alert(`✅ Settings saved!\n\n${result.added} properties added\n${result.removed} properties removed\n${result.total_monitored} total monitored`);
+        
+        // Offer to refresh guest health data
+        if (listingIds.length > 0 && confirm('Would you like to refresh guest health data now?')) {
+            switchView('guest-health');
+            setTimeout(() => refreshGuestHealth(), 500);
+        }
+    } catch (error) {
+        alert('Failed to save settings: ' + error.message);
+    }
 }

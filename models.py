@@ -93,6 +93,7 @@ class Message(Base):
     direction = Column(Enum(MessageDirection))
     source = Column(String(20))  # "hostify", "openphone", "slack", "system"
     content = Column(Text)
+    attachment_url = Column(String(500), nullable=True)  # Image/file attachments
     
     # AI metadata (for outbound messages)
     ai_confidence = Column(Float, nullable=True)
@@ -152,6 +153,45 @@ class GuestIndex(Base):
         return f"<GuestIndex {self.reservation_id} - {self.guest_name}>"
 
 
+class HostifyThread(Base):
+    """
+    Hostify inbox threads (conversations).
+    Stores thread-level metadata for quick querying by property.
+    """
+    __tablename__ = "hostify_threads"
+    
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(Integer, unique=True, index=True, nullable=False)  # Hostify's inbox/thread ID
+    
+    # Property info
+    listing_id = Column(String(100), index=True, nullable=True)
+    listing_name = Column(String(255), nullable=True)
+    
+    # Guest info
+    guest_name = Column(String(255), nullable=True)
+    guest_email = Column(String(255), nullable=True)
+    reservation_id = Column(String(100), index=True, nullable=True)
+    
+    # Dates
+    checkin = Column(DateTime, nullable=True)
+    checkout = Column(DateTime, nullable=True)
+    
+    # Thread status
+    last_message = Column(Text, nullable=True)
+    last_message_at = Column(DateTime, nullable=True)
+    message_count = Column(Integer, default=0)
+    
+    # Sync tracking
+    synced_at = Column(DateTime, default=datetime.utcnow)
+    messages_synced_at = Column(DateTime, nullable=True)  # When we last synced messages for this thread
+    
+    # Relationship to messages
+    messages = relationship("HostifyMessage", back_populates="thread", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<HostifyThread {self.thread_id} - {self.guest_name} @ {self.listing_name}>"
+
+
 class HostifyMessage(Base):
     """
     Messages from Hostify inbox.
@@ -161,15 +201,22 @@ class HostifyMessage(Base):
     
     id = Column(Integer, primary_key=True)
     hostify_message_id = Column(Integer, unique=True, index=True)
-    inbox_id = Column(Integer, index=True)
+    inbox_id = Column(Integer, ForeignKey("hostify_threads.thread_id"), index=True)
     reservation_id = Column(String(100), index=True, nullable=True)
     
     direction = Column(String(20))  # "inbound" or "outbound"
     content = Column(Text)
     sender_name = Column(String(255), nullable=True)
     
+    # Additional fields for Q&A extraction
+    sender_type = Column(String(20), nullable=True)  # "guest", "host", "automatic"
+    guest_name = Column(String(255), nullable=True)  # For direction detection
+    
     sent_at = Column(DateTime)
     synced_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship to thread
+    thread = relationship("HostifyThread", back_populates="messages")
     
     def __repr__(self):
         return f"<HostifyMessage {self.hostify_message_id}>"
@@ -374,8 +421,105 @@ class ResponseFeedback(Base):
         return f"<ResponseFeedback conv={self.conversation_id} edited={self.was_edited}>"
 
 
+class GuestHealthSettings(Base):
+    """
+    Settings for the Guest Health monitoring feature.
+    Stores which properties should be monitored for guest sentiment analysis.
+    """
+    __tablename__ = "guest_health_settings"
+    
+    id = Column(Integer, primary_key=True)
+    listing_id = Column(String(100), unique=True, index=True, nullable=False)
+    listing_name = Column(String(255), nullable=True)
+    is_enabled = Column(Boolean, default=True)  # Whether to monitor this property
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<GuestHealthSettings {self.listing_id} enabled={self.is_enabled}>"
+
+
+class SentimentLevel(PyEnum):
+    """Guest sentiment/happiness level."""
+    very_unhappy = "very_unhappy"  # Likely to leave negative review
+    unhappy = "unhappy"  # Has issues, needs attention
+    neutral = "neutral"  # No strong signals
+    happy = "happy"  # Positive interactions
+    very_happy = "very_happy"  # Great experience, likely good review
+
+
+class GuestHealthAnalysis(Base):
+    """
+    AI-analyzed guest health data for checked-in guests.
+    Stores sentiment analysis, complaints, issues, and recommendations.
+    """
+    __tablename__ = "guest_health_analysis"
+    
+    id = Column(Integer, primary_key=True)
+    
+    # Guest/Reservation identification
+    reservation_id = Column(String(100), unique=True, index=True, nullable=False)
+    guest_phone = Column(String(20), index=True, nullable=True)
+    guest_name = Column(String(255), nullable=True)
+    guest_email = Column(String(255), nullable=True)
+    
+    # Property info
+    listing_id = Column(String(100), index=True, nullable=False)
+    listing_name = Column(String(255), nullable=True)
+    
+    # Reservation details
+    check_in_date = Column(DateTime, nullable=True)
+    check_out_date = Column(DateTime, nullable=True)
+    nights_stayed = Column(Integer, nullable=True)
+    nights_remaining = Column(Integer, nullable=True)
+    reservation_total = Column(Float, nullable=True)
+    booking_source = Column(String(50), nullable=True)  # Airbnb, VRBO, Direct, etc.
+    
+    # AI-analyzed sentiment
+    sentiment = Column(Enum(SentimentLevel), default=SentimentLevel.neutral)
+    sentiment_score = Column(Float, nullable=True)  # -1.0 (very unhappy) to 1.0 (very happy)
+    sentiment_reasoning = Column(Text, nullable=True)
+    
+    # Complaints/Issues (JSON arrays)
+    complaints = Column(Text, nullable=True)  # JSON: [{issue, department, severity, status}]
+    unresolved_issues = Column(Text, nullable=True)  # JSON: [{issue, department, urgency}]
+    resolved_issues = Column(Text, nullable=True)  # JSON: [{issue, resolution}]
+    
+    # Response metrics
+    total_messages = Column(Integer, default=0)
+    guest_messages = Column(Integer, default=0)
+    avg_response_time_mins = Column(Float, nullable=True)
+    last_message_at = Column(DateTime, nullable=True)
+    last_message_from = Column(String(20), nullable=True)  # "guest" or "host"
+    
+    # Risk assessment
+    risk_level = Column(String(20), default="low")  # low, medium, high, critical
+    needs_attention = Column(Boolean, default=False)
+    attention_reason = Column(Text, nullable=True)
+    
+    # AI recommendations
+    recommended_actions = Column(Text, nullable=True)  # JSON: [{action, priority, reason}]
+    
+    # Tracking
+    last_analyzed_at = Column(DateTime, default=datetime.utcnow)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<GuestHealthAnalysis {self.guest_name} @ {self.listing_name} sentiment={self.sentiment.value if self.sentiment else 'unknown'}>"
+
+
 def init_db():
     """Initialize the database, creating all tables."""
+    # Import knowledge_base models so they get created
+    try:
+        from knowledge_base import PropertyKnowledge, UploadedFile, LearningSession
+    except ImportError:
+        pass  # knowledge_base not available yet
+    
     Base.metadata.create_all(bind=engine)
 
 

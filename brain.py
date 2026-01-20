@@ -314,10 +314,38 @@ async def generate_simple_response(
 ) -> AIResponse:
     """
     Generate a response using the simple (original) approach.
-    Uses just conversation history and style examples with GPT-4o.
+    Uses conversation history, style examples, AND property knowledge via RAG.
     
     This is the fallback when the advanced pipeline is disabled or fails.
     """
+    
+    # Get the latest guest message for knowledge retrieval
+    last_guest_message = ""
+    for msg in reversed(messages):
+        if msg.direction == MessageDirection.inbound:
+            last_guest_message = msg.content
+            break
+    
+    # Retrieve relevant knowledge from the knowledge base
+    property_knowledge = ""
+    if guest_context and guest_context.listing_id:
+        try:
+            from knowledge_base import search_knowledge
+            knowledge_results = search_knowledge(
+                query=last_guest_message,
+                listing_id=guest_context.listing_id if hasattr(guest_context, 'listing_id') else None,
+                top_k=5
+            )
+            
+            if knowledge_results:
+                property_knowledge = "\nPROPERTY KNOWLEDGE BASE (use this information to answer):\n"
+                for k in knowledge_results:
+                    property_knowledge += f"• {k['title']}: {k['content']}\n"
+                    if k.get('question') and k.get('answer'):
+                        property_knowledge += f"  Q: {k['question']}\n  A: {k['answer']}\n"
+                property_knowledge += "\n"
+        except Exception as e:
+            print(f"[Brain] Knowledge retrieval failed: {e}")
     
     # Build context string with guest information
     if guest_context:
@@ -349,30 +377,41 @@ GUEST INFORMATION:
             style_section += f"Guest: \"{ex.get('guest_message', '')}\"\n"
             style_section += f"You replied: \"{ex.get('your_reply', '')}\"\n\n"
     
-    # Build conversation history
+    # Build conversation history and collect images
     history = "CONVERSATION HISTORY:\n"
+    image_urls = []
     for msg in messages[-10:]:  # Last 10 messages
         role = "Guest" if msg.direction == MessageDirection.inbound else "You"
-        history += f"{role}: {msg.content}\n"
+        content = msg.content or ""
+        attachment = getattr(msg, 'attachment_url', None)
+        
+        if attachment:
+            history += f"{role}: [Sent an image: {attachment}]\n"
+            if msg.direction == MessageDirection.inbound:  # Only process guest images
+                image_urls.append(attachment)
+        if content:
+            history += f"{role}: {content}\n"
     
     # System prompt
     system_prompt = f"""You are an expert property manager assistant. Your job is to help guests with their stay.
 
 {context}
-
+{property_knowledge}
 {style_section}
 
 RULES:
 1. Be warm, friendly, and helpful
-2. Only provide information you have in the context above
-3. If you don't have the information or are unsure, set requires_human to true
-4. For complaints, emergencies, or refund requests, ALWAYS set requires_human to true
-5. Never make up information (door codes, wifi passwords, policies)
-6. Keep responses concise but friendly (2-4 sentences typically)
-7. Use the guest's name occasionally for a personal touch
+2. PRIORITIZE information from the PROPERTY KNOWLEDGE BASE - it contains accurate, property-specific details
+3. If knowledge base has the answer, use it confidently (high confidence score)
+4. Only provide information you have in the context or knowledge base
+5. If you don't have the information or are unsure, set requires_human to true
+6. For complaints, emergencies, or refund requests, ALWAYS set requires_human to true
+7. Never make up information (door codes, wifi passwords, policies)
+8. Keep responses concise but friendly (2-4 sentences typically)
+9. Use the guest's name occasionally for a personal touch
 
 CONFIDENCE SCORING GUIDELINES:
-- 0.90-1.00: Simple, factual questions with clear answers in context (wifi password, check-in time)
+- 0.90-1.00: Answer found in knowledge base or clear factual context
 - 0.80-0.89: Standard questions with good context available
 - 0.70-0.79: Questions requiring some interpretation or partial context
 - 0.50-0.69: Uncertain situations, missing info, or complex requests
@@ -388,13 +427,32 @@ OUTPUT FORMAT (strict JSON):
 }}"""
     
     try:
+        # Build the user message content
+        if image_urls:
+            # Use GPT-4o vision format with images
+            user_content = [
+                {"type": "text", "text": f"{history}\n\nThe guest has sent image(s). Please analyze them and respond appropriately.\n\nGenerate your response:"}
+            ]
+            for url in image_urls[-3:]:  # Limit to last 3 images to avoid token limits
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": url, "detail": "low"}  # Use "low" detail to save tokens
+                })
+            messages_payload = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ]
+        else:
+            # Standard text-only format
+            messages_payload = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"{history}\n\nGenerate your response:"}
+            ]
+        
         response = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"{history}\n\nGenerate your response:"}
-            ],
+            messages=messages_payload,
             temperature=0.7,
             max_tokens=500
         )

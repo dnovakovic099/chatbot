@@ -5,14 +5,137 @@ Syncs reservation data from Hostify to local database for fast phone lookups.
 
 import httpx
 import asyncio
+import threading
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import SessionLocal, GuestIndex, Conversation, ConversationStatus, Message, HostifyMessage
+from models import SessionLocal, GuestIndex, Conversation, ConversationStatus, Message, MessageDirection, HostifyMessage
 from utils import normalize_phone, log_event
+
+# ============================================================
+# Delayed AI Generation Mechanism
+# Groups multiple messages within 60 seconds before generating AI
+# ============================================================
+
+# Track pending AI generations: {conv_id: {"last_message_at": datetime, "timer": Timer, ...}}
+_pending_ai_generations: Dict[int, dict] = {}
+_pending_lock = threading.Lock()
+
+AI_GENERATION_DELAY_SECONDS = 60  # Wait 60 seconds to group messages
+
+
+def schedule_delayed_ai_generation(conv_id: int, inbox_id: str, guest_name: str):
+    """
+    Schedule AI generation for a conversation with a 60-second delay.
+    If more messages come in within 60 seconds, the timer is reset.
+    """
+    with _pending_lock:
+        # Cancel existing timer if any
+        if conv_id in _pending_ai_generations:
+            existing = _pending_ai_generations[conv_id]
+            if existing.get("timer"):
+                existing["timer"].cancel()
+        
+        # Create new timer
+        timer = threading.Timer(
+            AI_GENERATION_DELAY_SECONDS,
+            _execute_delayed_ai_generation,
+            args=[conv_id, inbox_id, guest_name]
+        )
+        timer.start()
+        
+        _pending_ai_generations[conv_id] = {
+            "last_message_at": datetime.utcnow(),
+            "timer": timer,
+            "inbox_id": inbox_id,
+            "guest_name": guest_name
+        }
+        
+        log_event("ai_generation_scheduled", payload={
+            "conversation_id": conv_id,
+            "guest_name": guest_name,
+            "delay_seconds": AI_GENERATION_DELAY_SECONDS
+        })
+
+
+def _execute_delayed_ai_generation(conv_id: int, inbox_id: str, guest_name: str):
+    """Execute AI generation after the delay."""
+    import asyncio
+    
+    # Clean up tracking
+    with _pending_lock:
+        if conv_id in _pending_ai_generations:
+            del _pending_ai_generations[conv_id]
+    
+    print(f"[AI Generation] ⏱️ Delay complete for {guest_name}, generating AI suggestion...")
+    
+    # Run the async generation in a new event loop
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_generate_ai_for_conversation(conv_id, inbox_id, guest_name))
+        loop.close()
+    except Exception as e:
+        print(f"[AI Generation] ❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+async def _generate_ai_for_conversation(conv_id: int, inbox_id: str, guest_name: str):
+    """Generate AI suggestion for a conversation after delay."""
+    from brain import generate_ai_response, get_style_examples
+    
+    # System messages to skip
+    SYSTEM_MESSAGES = {
+        "INQUIRY_CREATED", "BOOKING_CONFIRMED", "BOOKING_CANCELLED",
+        "CHECK_IN_REMINDER", "CHECK_OUT_REMINDER", "REVIEW_REMINDER"
+    }
+    
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
+        if not conv:
+            print(f"[AI Generation] Conversation {conv_id} not found")
+            return
+        
+        # Find all unanswered inbound messages (not system messages, no AI suggestion yet)
+        inbound_msgs = db.query(Message).filter(
+            Message.conversation_id == conv_id,
+            Message.direction == MessageDirection.inbound
+        ).order_by(Message.sent_at.desc()).all()
+        
+        # Find the last real message that needs a suggestion
+        last_real_msg = None
+        for msg in inbound_msgs:
+            content = (msg.content or "").strip().upper()
+            if content not in SYSTEM_MESSAGES and not msg.ai_suggested_reply:
+                # Also check if it has actual content or is just an image
+                if msg.content or msg.attachment_url:
+                    last_real_msg = msg
+                    break
+        
+        if not last_real_msg:
+            print(f"[AI Generation] No message needing AI response for {guest_name}")
+            return
+        
+        log_event("new_message_needs_response", payload={
+            "conversation_id": conv_id,
+            "guest_name": guest_name,
+            "inbox_id": inbox_id
+        })
+        
+        # Generate AI suggestion
+        await _generate_and_save_ai_suggestion(conv, last_real_msg, db)
+        
+    except Exception as e:
+        print(f"[AI Generation] ❌ Error generating AI for {guest_name}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        db.close()
 
 
 class HostifyClient:
@@ -396,16 +519,15 @@ async def sync_messages(limit_threads: int = 200):
     # Fetch all inbox threads (paginated)
     all_threads = []
     page = 1
-    per_page = 100
     
+    # Hostify returns 20 threads per page regardless of limit parameter
+    # Keep paginating until empty response or we hit our limit
     while len(all_threads) < limit_threads:
-        threads = await hostify_client.get_inbox_threads(limit=per_page, page=page)
+        threads = await hostify_client.get_inbox_threads(limit=100, page=page)
         if not threads:
             break
         all_threads.extend(threads)
         print(f"[Sync Messages] Fetched page {page}: {len(threads)} threads (total: {len(all_threads)})")
-        if len(threads) < per_page:
-            break
         page += 1
         await asyncio.sleep(0.1)
     
@@ -465,7 +587,11 @@ async def sync_messages(limit_threads: int = 200):
                     db.add(conversation)
                     db.flush()
                 else:
-                    # Update existing conversation with dates if missing
+                    # Update existing conversation with latest info if missing
+                    if listing_name and (not conversation.listing_name or conversation.listing_name == ""):
+                        conversation.listing_name = listing_name
+                    if listing_id and not conversation.listing_id:
+                        conversation.listing_id = listing_id
                     if not conversation.check_in_date and check_in_date:
                         conversation.check_in_date = check_in_date
                     if not conversation.check_out_date and check_out_date:
@@ -484,33 +610,44 @@ async def sync_messages(limit_threads: int = 200):
                     if db.query(Message).filter(Message.external_id == msg_id).first():
                         continue
                     
-                    # Determine direction using Hostify's "from" field
-                    # Values: "guest" = from guest, "host" = from host, "automatic" = from host (auto)
-                    sender_field = msg_data.get("from", "")
-                    msg_guest_name = msg_data.get("guest_name")
+                    # Determine direction - handle Hostify API quirks
+                    # Sometimes ALL messages have from="guest" but different guest_name values
+                    sender_field = msg_data.get("from", "").lower()
+                    msg_guest_name = (msg_data.get("guest_name") or "").strip()
+                    conv_guest_name = (guest_name or "").strip()
                     
-                    if sender_field == "guest":
-                        direction = "inbound"  # Explicitly from guest
-                    elif sender_field == "automatic":
-                        direction = "outbound"  # Automated host messages
-                    elif sender_field == "host" and msg_guest_name and msg_guest_name.strip() == guest_name.strip():
-                        # Hostify bug: sometimes marks guest messages as from="host" 
-                        # but includes the guest's name in guest_name field
-                        direction = "inbound"
+                    if sender_field == "host" or sender_field == "automatic":
+                        direction = "outbound"
+                    elif sender_field == "guest":
+                        # Check if msg guest_name matches the conversation's guest
+                        # If it doesn't match, it's from a co-host (Hostify bug)
+                        if msg_guest_name and conv_guest_name:
+                            if msg_guest_name.lower() == conv_guest_name.lower():
+                                direction = "inbound"  # Real guest
+                            else:
+                                direction = "outbound"  # Co-host marked as guest
+                        else:
+                            direction = "inbound"  # Default
                     else:
-                        direction = "outbound"  # From host
+                        direction = "outbound"
                     
                     # Parse timestamp - Hostify uses "created" field
                     msg_time = msg_data.get("created") or msg_data.get("created_at") or msg_data.get("sent_at")
                     sent_at = _parse_datetime(msg_time) if msg_time else datetime.utcnow()
                     
                     content = msg_data.get("message") or msg_data.get("body") or msg_data.get("text") or ""
+                    attachment_url = msg_data.get("attachment_url") or msg_data.get("image")
+                    
+                    # Skip if no content AND no attachment
+                    if not content and not attachment_url:
+                        continue
                     
                     message = Message(
                         conversation_id=conversation.id,
                         direction=direction,
                         source="hostify",
                         content=content,
+                        attachment_url=attachment_url,
                         external_id=msg_id,
                         sent_at=sent_at,
                         was_auto_sent=False,  # Historical messages are not auto-sent
@@ -576,33 +713,62 @@ async def sync_single_inbox_thread(inbox_id: str):
     db = SessionLocal()
     
     try:
-        # Fetch the specific thread's messages (async!)
-        messages = await client.get_inbox_messages(inbox_id)
+        # Fetch the specific thread's data (includes messages and thread metadata)
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            resp = await http_client.get(
+                f"{client.base_url}/inbox/{inbox_id}",
+                headers=client.headers
+            )
+            if resp.status_code != 200:
+                print(f"[Webhook Sync] Failed to fetch thread {inbox_id}: {resp.status_code}")
+                return
+            thread_data = resp.json()
+        
+        thread = thread_data.get("thread", {})
+        messages = thread_data.get("messages", [])
         
         if not messages:
             print(f"[Webhook Sync] No messages found for inbox {inbox_id}")
             return
         
-        # Get thread metadata (we need listing info)
-        # Fetch all threads and find the one we want (async!)
-        threads = await client.get_inbox_threads(limit=100)
-        thread = next((t for t in threads if str(t.get("id")) == str(inbox_id)), None)
-        
-        if not thread:
-            print(f"[Webhook Sync] Thread {inbox_id} not found in inbox list")
-            return
-        
-        # Extract conversation data
-        guest_name = thread.get("guest_name", "")
-        listing_name = thread.get("listing_name", "")
         listing_id = str(thread.get("listing_id", ""))
         reservation_id = str(thread.get("reservation_id", "")) if thread.get("reservation_id") else None
         guest_phone = f"inbox_{inbox_id}"  # Use inbox ID as identifier
+        source = thread.get("integration_type_name") or ""  # e.g., "Airbnb", "Vrbo"
         
-        # Parse dates
-        check_in = _parse_datetime(thread.get("check_in"))
-        check_out = _parse_datetime(thread.get("check_out"))
-        source = thread.get("source") or thread.get("integration", "")
+        # Try to get guest_name and listing_name from inbox list (more reliable)
+        guest_name = "Unknown Guest"
+        listing_name = ""
+        try:
+            inbox_threads = await client.get_inbox_threads(limit=200)
+            inbox_thread = next((t for t in inbox_threads if str(t.get("id")) == str(inbox_id)), None)
+            if inbox_thread:
+                guest_name = inbox_thread.get("guest_name", "Unknown Guest")
+                listing_name = inbox_thread.get("listing_title") or inbox_thread.get("listing", "")
+                print(f"[Webhook Sync] Found in inbox: guest={guest_name}, listing={listing_name}")
+        except Exception as e:
+            print(f"[Webhook Sync] Warning: Could not fetch inbox list: {e}")
+        
+        # Fallback: get guest_name from messages if not found
+        if guest_name == "Unknown Guest":
+            guest_names = [m.get("guest_name") for m in messages if m.get("from") == "guest" and m.get("guest_name")]
+            guest_name = guest_names[0] if guest_names else "Unknown Guest"
+        
+        # Fallback: try to get listing name from our database
+        if not listing_name and listing_id:
+            from models import GuestIndex
+            cached_guest = db.query(GuestIndex).filter(GuestIndex.listing_id == listing_id).first()
+            if cached_guest and cached_guest.listing_name:
+                listing_name = cached_guest.listing_name
+        
+        if not listing_name:
+            existing_conv = db.query(Conversation).filter(Conversation.listing_id == listing_id).first()
+            if existing_conv and existing_conv.listing_name:
+                listing_name = existing_conv.listing_name
+        
+        # Parse dates from thread
+        check_in = _parse_datetime(thread.get("checkin") or thread.get("start_date"))
+        check_out = _parse_datetime(thread.get("checkout"))
         
         # Find or create conversation
         conv = db.query(Conversation).filter(
@@ -623,6 +789,27 @@ async def sync_single_inbox_thread(inbox_id: str):
             db.add(conv)
             db.commit()
             print(f"[Webhook Sync] Created conversation for {guest_name}")
+        else:
+            # Update existing conversation with latest info
+            updated = False
+            if listing_name and (not conv.listing_name or conv.listing_name == "Unknown property"):
+                conv.listing_name = listing_name
+                updated = True
+            if listing_id and not conv.listing_id:
+                conv.listing_id = listing_id
+                updated = True
+            if check_in and not conv.check_in_date:
+                conv.check_in_date = check_in
+                updated = True
+            if check_out and not conv.check_out_date:
+                conv.check_out_date = check_out
+                updated = True
+            if source and not conv.booking_source:
+                conv.booking_source = source
+                updated = True
+            if updated:
+                db.commit()
+                print(f"[Webhook Sync] Updated conversation info for {guest_name}")
         
         # Sync messages
         new_message_count = 0
@@ -637,22 +824,36 @@ async def sync_single_inbox_thread(inbox_id: str):
             if existing:
                 continue
             
-            # Determine direction
+            # Determine direction - handle Hostify API quirks
+            # Sometimes ALL messages have from="guest" but different guest_name values
+            # The actual guest's name should match the conversation's guest_name
             from_field = msg_data.get("from", "").lower()
-            msg_guest_name = msg_data.get("guest_name", "")
+            msg_guest_name = (msg_data.get("guest_name") or "").strip()
+            conv_guest_name = (guest_name or "").strip()
             
-            if from_field == "guest":
-                direction = MessageDirection.inbound
-            elif from_field == "host" and msg_guest_name and msg_guest_name.lower() == guest_name.lower():
-                direction = MessageDirection.inbound
+            if from_field == "host" or from_field == "automatic":
+                # Explicit host or automated message
+                direction = MessageDirection.outbound
+            elif from_field == "guest":
+                # Check if the message's guest_name matches the conversation's guest
+                # If it doesn't match, it's likely from a co-host (Hostify bug)
+                if msg_guest_name and conv_guest_name:
+                    if msg_guest_name.lower() == conv_guest_name.lower():
+                        direction = MessageDirection.inbound  # Real guest
+                    else:
+                        direction = MessageDirection.outbound  # Co-host marked as guest
+                else:
+                    direction = MessageDirection.inbound  # Default if no name to compare
             else:
                 direction = MessageDirection.outbound
             
             # Parse timestamp
             sent_at = _parse_datetime(msg_data.get("created")) or datetime.utcnow()
-            content = msg_data.get("message", "")
+            content = msg_data.get("message", "") or ""
+            attachment_url = msg_data.get("attachment_url") or msg_data.get("image")
             
-            if not content:
+            # Skip messages with no content AND no attachment
+            if not content and not attachment_url:
                 continue
             
             # Create message
@@ -660,10 +861,10 @@ async def sync_single_inbox_thread(inbox_id: str):
                 conversation_id=conv.id,
                 external_id=msg_id,
                 direction=direction,
-                channel="hostify",
+                source="hostify",
                 content=content,
-                sent_at=sent_at,
-                processed=True
+                attachment_url=attachment_url,
+                sent_at=sent_at
             )
             db.add(message)
             new_message_count += 1
@@ -676,24 +877,10 @@ async def sync_single_inbox_thread(inbox_id: str):
         
         print(f"[Webhook Sync] ✅ Synced {new_message_count} new message(s) for {guest_name}")
         
-        # Generate AI suggestion for new inbound messages
+        # Schedule delayed AI suggestion (60s delay to group multiple messages)
         if new_message_count > 0:
-            last_msg = db.query(Message).filter(
-                Message.conversation_id == conv.id
-            ).order_by(Message.sent_at.desc()).first()
-            
-            if last_msg and last_msg.direction == MessageDirection.inbound:
-                log_event("new_message_needs_response", payload={
-                    "conversation_id": conv.id,
-                    "guest_name": guest_name,
-                    "inbox_id": inbox_id
-                })
-                
-                # Generate and save AI suggestion
-                try:
-                    await _generate_and_save_ai_suggestion(conv, last_msg, db)
-                except Exception as e:
-                    print(f"[Webhook Sync] ⚠️ Failed to generate AI suggestion: {e}")
+            schedule_delayed_ai_generation(conv.id, inbox_id, guest_name)
+            print(f"[Webhook Sync] ⏱️ Scheduled AI generation in 60s for {guest_name}")
         
     except Exception as e:
         print(f"[Webhook Sync] ❌ Error syncing inbox {inbox_id}: {e}")
@@ -720,6 +907,7 @@ async def _generate_and_save_ai_suggestion(conv, message, db):
     guest_context = GuestIndex(
         guest_phone=conv.guest_phone or "unknown",
         guest_name=conv.guest_name,
+        listing_id=conv.listing_id,  # Include listing_id for RAG lookup
         listing_name=conv.listing_name,
         check_in_date=conv.check_in_date,
         check_out_date=conv.check_out_date,

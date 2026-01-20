@@ -93,6 +93,18 @@ async def lifespan(app: FastAPI):
     )
     print("✅ Scheduled reservation sync (every 30 mins)")
     
+    # Schedule message sync every 2 minutes (catches messages if webhooks fail)
+    from cache import sync_messages
+    scheduler.add_job(
+        sync_messages,
+        'interval',
+        minutes=2,
+        id='sync_messages',
+        replace_existing=True,
+        kwargs={'limit_threads': 20}  # Only check recent threads
+    )
+    print("✅ Scheduled message sync (every 2 mins - webhook backup)")
+    
     # Schedule initial sync to run in 5 seconds (non-blocking startup)
     scheduler.add_job(
         sync_reservations,
