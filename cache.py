@@ -576,16 +576,16 @@ async def sync_single_inbox_thread(inbox_id: str):
     db = SessionLocal()
     
     try:
-        # Fetch the specific thread's messages
-        messages = client.get_inbox_messages(inbox_id)
+        # Fetch the specific thread's messages (async!)
+        messages = await client.get_inbox_messages(inbox_id)
         
         if not messages:
             print(f"[Webhook Sync] No messages found for inbox {inbox_id}")
             return
         
         # Get thread metadata (we need listing info)
-        # Fetch all threads and find the one we want
-        threads = client.get_inbox_threads(limit=100)
+        # Fetch all threads and find the one we want (async!)
+        threads = await client.get_inbox_threads(limit=100)
         thread = next((t for t in threads if str(t.get("id")) == str(inbox_id)), None)
         
         if not thread:

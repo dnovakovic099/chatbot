@@ -302,12 +302,12 @@ async def webhook_hostify_sns(
     if action == "message_new":
         thread_id = payload.get("thread_id")
         is_incoming = payload.get("is_incoming", 0)
-        message_content = payload.get("message", "")
+        message_content = payload.get("message") or ""  # Handle null message
         
         log_event("hostify_message_new", payload={
             "thread_id": thread_id,
             "is_incoming": is_incoming,
-            "message_preview": message_content[:100]
+            "message_preview": message_content[:100] if message_content else "(empty)"
         })
         
         # Only process inbound messages (from guest)
