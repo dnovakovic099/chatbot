@@ -1,0 +1,92 @@
+[
+  {
+    "category": "wifi",
+    "guest_message": "What's the wifi password?",
+    "your_reply": "Hi! The WiFi network is 'CozyStay_5G' and the password is 'Welcome2024'. Let me know if you have any trouble connecting!",
+    "tags": ["quick_info", "friendly"]
+  },
+  {
+    "category": "wifi",
+    "guest_message": "I can't connect to the internet",
+    "your_reply": "Sorry to hear that! Try forgetting the network on your device and reconnecting. The network is 'CozyStay_5G' with password 'Welcome2024'. If it still doesn't work, try restarting the router (unplug for 30 seconds). Let me know!",
+    "tags": ["troubleshoot", "instructional"]
+  },
+  {
+    "category": "check_in",
+    "guest_message": "What time can we check in?",
+    "your_reply": "Check-in is at 4 PM! I'll send you the door code about an hour before. If you're arriving earlier, just let me know and I'll see if the place is ready.",
+    "tags": ["policy", "flexible", "friendly"]
+  },
+  {
+    "category": "check_in",
+    "guest_message": "Can we check in early?",
+    "your_reply": "I'd love to accommodate an early check-in if possible! Let me check if the cleaners will be done early. What time were you hoping to arrive? I'll do my best!",
+    "tags": ["flexible", "supportive"]
+  },
+  {
+    "category": "check_out",
+    "guest_message": "What time is checkout?",
+    "your_reply": "Check-out is at 11 AM. Just leave the keys on the kitchen counter and lock the door behind you. No need for anything fancy - just a quick tidy and you're all set!",
+    "tags": ["quick_info", "friendly"]
+  },
+  {
+    "category": "check_out",
+    "guest_message": "Can we get a late checkout?",
+    "your_reply": "Let me check if we have guests coming in that day! If not, a late checkout is usually no problem. What time were you thinking? I'll get back to you shortly.",
+    "tags": ["flexible", "clarifying"]
+  },
+  {
+    "category": "access",
+    "guest_message": "What's the door code?",
+    "your_reply": "The door code is 1234#. Just punch it in on the keypad and the door will unlock. Make sure to press # at the end!",
+    "tags": ["quick_info", "instructional"]
+  },
+  {
+    "category": "access",
+    "guest_message": "The door code isn't working",
+    "your_reply": "I'm sorry about that! Let's troubleshoot: 1) Make sure you're pressing # after the code 2) Try entering it slowly 3) Check that the keypad has power (should light up). What happens when you try?",
+    "tags": ["troubleshoot", "empathetic"]
+  },
+  {
+    "category": "issue",
+    "guest_message": "The AC isn't working",
+    "your_reply": "I'm so sorry about that! Can you check if the thermostat is set to 'Cool' and the temperature is below room temp? Sometimes it just needs a minute to kick in. If it's still not working, I'll send someone over ASAP.",
+    "tags": ["troubleshoot", "empathetic"]
+  },
+  {
+    "category": "issue",
+    "guest_message": "The hot water isn't working",
+    "your_reply": "Oh no, that's frustrating! The water heater can sometimes take a few minutes to warm up. If you've let it run for 3-4 minutes and it's still cold, let me know and I'll get someone out right away.",
+    "tags": ["troubleshoot", "empathetic", "supportive"]
+  },
+  {
+    "category": "parking",
+    "guest_message": "Where do we park?",
+    "your_reply": "You can park in the driveway - there's space for 2 cars. Street parking is also available and free (no permits needed). Just avoid blocking the neighbor's driveway!",
+    "tags": ["quick_info", "friendly"]
+  },
+  {
+    "category": "amenities",
+    "guest_message": "Is there a washer and dryer?",
+    "your_reply": "Yes! There's a washer and dryer in the hallway closet. Detergent pods are in the cabinet above. Let me know if you need any help with it!",
+    "tags": ["quick_info", "friendly"]
+  },
+  {
+    "category": "directions",
+    "guest_message": "What's the address?",
+    "your_reply": "The address is 123 Main Street. GPS should take you right there! There's a blue house with a red door - you can't miss it.",
+    "tags": ["quick_info", "friendly"]
+  },
+  {
+    "category": "thanks",
+    "guest_message": "Thank you so much for everything!",
+    "your_reply": "You're so welcome! It was a pleasure having you. Safe travels and hope to host you again soon! 🏠",
+    "tags": ["friendly", "polite"]
+  },
+  {
+    "category": "general",
+    "guest_message": "Is there coffee?",
+    "your_reply": "Yes! There's a coffee maker on the kitchen counter with coffee and filters. Creamer and sugar are in the pantry. Enjoy your morning brew! ☕",
+    "tags": ["quick_info", "friendly"]
+  }
+]

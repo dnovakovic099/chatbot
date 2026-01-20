@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Brain | AI Property Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <div class="logo-icon">🧠</div>
+                <div class="logo-text">
+                    <span class="logo-title">The Brain</span>
+                    <span class="logo-subtitle">v3.1</span>
+                </div>
+            </div>
+            
+            <nav class="nav">
+                <a href="#" class="nav-item active" data-view="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#" class="nav-item" data-view="conversations">
+                    <span class="nav-icon">💬</span>
+                    <span>Conversations</span>
+                </a>
+                <a href="#" class="nav-item" data-view="test">
+                    <span class="nav-icon">🧪</span>
+                    <span>Test Console</span>
+                </a>
+                <a href="#" class="nav-item" data-view="guests">
+                    <span class="nav-icon">👥</span>
+                    <span>Guest Cache</span>
+                </a>
+                <a href="#" class="nav-item" data-view="logs">
+                    <span class="nav-icon">📋</span>
+                    <span>System Logs</span>
+                </a>
+                <a href="#" class="nav-item" data-view="config">
+                    <span class="nav-icon">⚙️</span>
+                    <span>Configuration</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator" id="status-indicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Checking...</span>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Dashboard View -->
+            <section class="view active" id="view-dashboard">
+                <header class="view-header">
+                    <h1>Dashboard</h1>
+                    <button class="btn btn-secondary" onclick="refreshStats()">↻ Refresh</button>
+                </header>
+                
+                <div class="stats-grid" id="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-total">-</div>
+                        <div class="stat-label">Total Conversations</div>
+                    </div>
+                    <div class="stat-card highlight">
+                        <div class="stat-value" id="stat-active">-</div>
+                        <div class="stat-label">Active</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-value" id="stat-escalated">-</div>
+                        <div class="stat-label">Escalated</div>
+                    </div>
+                    <div class="stat-card success">
+                        <div class="stat-value" id="stat-resolved">-</div>
+                        <div class="stat-label">Resolved Today</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-messages">-</div>
+                        <div class="stat-label">Messages Today</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-auto">-</div>
+                        <div class="stat-label">Auto-Sent Today</div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>Recent Activity</h2>
+                    <div class="activity-feed" id="activity-feed">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Conversations View -->
+            <section class="view" id="view-conversations">
+                <header class="view-header">
+                    <h1>Conversations</h1>
+                    <div class="view-actions">
+                        <select id="status-filter" onchange="filterConversations()">
+                            <option value="">All Status</option>
+                            <option value="active">Active</option>
+                            <option value="escalated_l1">Escalated L1</option>
+                            <option value="escalated_l2">Escalated L2</option>
+                            <option value="snoozed">Snoozed</option>
+                            <option value="resolved">Resolved</option>
+                        </select>
+                        <button class="btn btn-secondary" onclick="loadConversations()">↻ Refresh</button>
+                    </div>
+                </header>
+                
+                <div class="conversations-container">
+                    <div class="conversations-list" id="conversations-list">
+                        <div class="loading">Loading...</div>
+                    </div>
+                    <div class="conversation-detail" id="conversation-detail">
+                        <div class="empty-state">
+                            <span class="empty-icon">💬</span>
+                            <p>Select a conversation to view details</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Test Console View -->
+            <section class="view" id="view-test">
+                <header class="view-header">
+                    <h1>Test Console</h1>
+                    <button class="btn btn-primary" onclick="addTestGuest()">+ Add Test Guest</button>
+                </header>
+                
+                <div class="test-container">
+                    <div class="test-panel">
+                        <h2>Simulate Incoming Message</h2>
+                        <p class="help-text">Send a test message to simulate a guest texting your system.</p>
+                        
+                        <div class="form-group">
+                            <label for="test-phone">Guest Phone Number</label>
+                            <input type="text" id="test-phone" placeholder="+15551234567" value="+15551234567">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="test-message">Message</label>
+                            <textarea id="test-message" rows="4" placeholder="What's the wifi password?">What's the wifi password?</textarea>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Quick Messages</label>
+                            <div class="quick-messages">
+                                <button class="chip" onclick="setTestMessage('What\\'s the wifi password?')">WiFi Password</button>
+                                <button class="chip" onclick="setTestMessage('What time is check-in?')">Check-in Time</button>
+                                <button class="chip" onclick="setTestMessage('The AC is not working!')">Issue Report</button>
+                                <button class="chip" onclick="setTestMessage('I need a refund immediately')">Refund Request</button>
+                                <button class="chip" onclick="setTestMessage('What\\'s the door code?')">Door Code</button>
+                                <button class="chip" onclick="setTestMessage('Is there parking available?')">Parking</button>
+                            </div>
+                        </div>
+                        
+                        <button class="btn btn-primary btn-large" onclick="sendTestMessage()">
+                            Send Test Message
+                        </button>
+                        
+                        <div class="test-result" id="test-result"></div>
+                    </div>
+                    
+                    <div class="test-panel">
+                        <h2>System Actions</h2>
+                        
+                        <div class="action-card" onclick="triggerSync()">
+                            <div class="action-icon">🔄</div>
+                            <div class="action-info">
+                                <h3>Sync Reservations</h3>
+                                <p>Manually trigger a sync with Hostify</p>
+                            </div>
+                        </div>
+                        
+                        <div class="action-card" onclick="addTestGuest()">
+                            <div class="action-icon">👤</div>
+                            <div class="action-info">
+                                <h3>Add Test Guest</h3>
+                                <p>Add a sample guest to the cache for testing</p>
+                            </div>
+                        </div>
+                        
+                        <div class="action-card" onclick="window.open('/docs', '_blank')">
+                            <div class="action-icon">📚</div>
+                            <div class="action-info">
+                                <h3>API Documentation</h3>
+                                <p>View the full API documentation</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Guests View -->
+            <section class="view" id="view-guests">
+                <header class="view-header">
+                    <h1>Guest Cache</h1>
+                    <div class="view-actions">
+                        <span class="cache-count" id="cache-count">- guests cached</span>
+                        <button class="btn btn-secondary sync-btn" onclick="triggerSyncBackground()">🔄 Sync Now</button>
+                    </div>
+                </header>
+                
+                <div class="filter-bar">
+                    <input type="text" id="guest-search" placeholder="Search by name, property, or reservation..." 
+                           oninput="searchGuests()" class="search-input">
+                    <select id="guest-filter" onchange="filterGuests()">
+                        <option value="">All Guests</option>
+                        <option value="yes">With Phone</option>
+                        <option value="no">Without Phone (needs linking)</option>
+                    </select>
+                </div>
+                
+                <div class="table-container">
+                    <table class="data-table" id="guests-table">
+                        <thead>
+                            <tr>
+                                <th>Guest Name</th>
+                                <th>Phone</th>
+                                <th>Property</th>
+                                <th>Check-in</th>
+                                <th>Check-out</th>
+                                <th>Reservation ID</th>
+                                <th>Synced</th>
+                            </tr>
+                        </thead>
+                        <tbody id="guests-tbody">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            
+            <!-- Logs View -->
+            <section class="view" id="view-logs">
+                <header class="view-header">
+                    <h1>System Logs</h1>
+                    <div class="view-actions">
+                        <select id="log-filter" onchange="filterLogs()">
+                            <option value="">All Events</option>
+                            <option value="message_received">Message Received</option>
+                            <option value="ai_response_generated">AI Response</option>
+                            <option value="auto_sent">Auto Sent</option>
+                            <option value="escalated_l1">Escalated L1</option>
+                            <option value="escalated_l2">Escalated L2</option>
+                            <option value="api_error">API Error</option>
+                        </select>
+                        <button class="btn btn-secondary" onclick="loadLogs()">↻ Refresh</button>
+                    </div>
+                </header>
+                
+                <div class="logs-container" id="logs-container">
+                    <div class="loading">Loading...</div>
+                </div>
+            </section>
+            
+            <!-- Config View -->
+            <section class="view" id="view-config">
+                <header class="view-header">
+                    <h1>Configuration</h1>
+                </header>
+                
+                <div class="config-container" id="config-container">
+                    <div class="loading">Loading...</div>
+                </div>
+            </section>
+        </main>
+    </div>
+    
+    <!-- Link Phone Modal -->
+    <div class="modal-overlay" id="link-phone-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Link Phone Number</h2>
+                <button class="modal-close" onclick="closeLinkPhoneModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <p>Link a phone number to this guest so the system can identify them when they text.</p>
+                <input type="hidden" id="link-reservation-id">
+                <div class="form-group">
+                    <label>Guest</label>
+                    <div id="link-guest-name" class="modal-guest-name">-</div>
+                </div>
+                <div class="form-group">
+                    <label for="link-phone-input">Phone Number</label>
+                    <input type="tel" id="link-phone-input" placeholder="+1 555-123-4567">
+                </div>
+                <div class="link-result" id="link-result"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeLinkPhoneModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitLinkPhone()">Link Phone</button>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>
