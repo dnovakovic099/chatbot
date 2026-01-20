@@ -236,6 +236,9 @@ async def webhook_hostify_sns(
     
     body = await request.body()
     
+    # Log raw request for debugging
+    print(f"[Webhook] Raw body: {body.decode()[:500]}")
+    
     # SNS sends JSON but with different content types
     try:
         payload = json.loads(body)
@@ -244,9 +247,19 @@ async def webhook_hostify_sns(
         return {"status": "error", "reason": "Invalid JSON"}
     
     sns_type = payload.get("Type")
-    log_event("sns_webhook_received", payload={"type": sns_type, "topic": payload.get("TopicArn", "")})
+    action = payload.get("action")  # Direct Hostify format uses "action"
     
-    # Handle subscription confirmation
+    # Log for debugging
+    log_event("webhook_received", payload={
+        "sns_type": sns_type, 
+        "action": action,
+        "is_incoming": payload.get("is_incoming"),
+        "thread_id": payload.get("thread_id"),
+        "message_preview": str(payload.get("message", ""))[:100]
+    })
+    print(f"[Webhook] SNS Type: {sns_type}, Action: {action}, is_incoming: {payload.get('is_incoming')}")
+    
+    # ==== Handle SNS Subscription Confirmation ====
     if sns_type == "SubscriptionConfirmation":
         subscribe_url = payload.get("SubscribeURL")
         if subscribe_url:
@@ -264,42 +277,59 @@ async def webhook_hostify_sns(
                 return {"status": "error", "reason": str(e)}
         return {"status": "error", "reason": "No SubscribeURL"}
     
-    # Handle notification (new message)
+    # ==== Handle SNS Notification (wrapped format) ====
     if sns_type == "Notification":
         try:
-            # The actual message is JSON inside the Message field
             message_data = json.loads(payload.get("Message", "{}"))
         except json.JSONDecodeError:
             message_data = {"raw": payload.get("Message", "")}
         
         log_event("sns_message_received", payload=message_data)
-        
-        # Extract message details from Hostify notification
-        # Structure may vary - adjust based on actual Hostify payload
         inbox_id = message_data.get("inbox_id") or message_data.get("thread_id")
-        msg_id = message_data.get("message_id") or message_data.get("id")
-        content = message_data.get("message") or message_data.get("content") or message_data.get("body", "")
-        sender = message_data.get("from") or message_data.get("sender", "")
-        guest_name = message_data.get("guest_name", "")
+        is_incoming = message_data.get("is_incoming", 0)
         
-        # Only process inbound messages (from guest)
-        if sender == "host" or sender == "automatic":
+        if not is_incoming:
             return {"status": "ignored", "reason": "outbound message"}
         
-        # If we have an inbox_id, sync that specific thread
         if inbox_id:
             from cache import sync_single_inbox_thread
-            background_tasks.add_task(sync_single_inbox_thread, inbox_id)
+            background_tasks.add_task(sync_single_inbox_thread, str(inbox_id))
             return {"status": "queued", "inbox_id": inbox_id}
         
         return {"status": "received", "data": message_data}
+    
+    # ==== Handle Direct Hostify Format (action: "message_new") ====
+    if action == "message_new":
+        thread_id = payload.get("thread_id")
+        is_incoming = payload.get("is_incoming", 0)
+        message_content = payload.get("message", "")
+        
+        log_event("hostify_message_new", payload={
+            "thread_id": thread_id,
+            "is_incoming": is_incoming,
+            "message_preview": message_content[:100]
+        })
+        
+        # Only process inbound messages (from guest)
+        # is_incoming: 1 = guest message, 0 = host message
+        if not is_incoming:
+            print(f"[Webhook] Ignoring outbound message (is_incoming=0)")
+            return {"status": "ignored", "reason": "outbound message (host sent)"}
+        
+        if thread_id:
+            print(f"[Webhook] ✅ New guest message! Syncing thread {thread_id}")
+            from cache import sync_single_inbox_thread
+            background_tasks.add_task(sync_single_inbox_thread, str(thread_id))
+            return {"status": "queued", "thread_id": thread_id, "message": "Syncing and generating AI suggestion"}
+        
+        return {"status": "error", "reason": "No thread_id in payload"}
     
     # Handle unsubscribe confirmation
     if sns_type == "UnsubscribeConfirmation":
         log_event("sns_unsubscribed", payload={"topic": payload.get("TopicArn")})
         return {"status": "unsubscribed"}
     
-    return {"status": "unknown_type", "type": sns_type}
+    return {"status": "unknown_format", "sns_type": sns_type, "action": action}
 
 
 @app.post("/webhook/openphone")
