@@ -694,42 +694,54 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     
     listing_ids = [p["listing_id"] for p in monitored]
     
-    # Get checked-in guests from HostifyThread table
-    # HostifyThread uses listing_ids from the inbox API (matches our monitored properties)
-    # A guest is checked in if: checkin <= now AND checkout >= today
-    # We also filter for threads WITH a reservation_id (confirmed bookings, not inquiries)
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Query conversations - a guest is checked in if: check_in_date <= now AND check_out_date >= today
-    # Note: Using Conversation table which is populated by sync_messages
-    conversations = db.query(Conversation).filter(
-        Conversation.listing_id.in_(listing_ids),
-        Conversation.check_in_date.isnot(None),
-        Conversation.check_in_date <= now,
-        Conversation.check_out_date >= today
+    # Get all checked-in threads at monitored properties
+    all_threads = db.query(HostifyThread).filter(
+        HostifyThread.listing_id.in_(listing_ids),
+        HostifyThread.checkin <= now,
+        HostifyThread.checkout >= today
     ).all()
     
-    print(f"[GuestHealth] Found {len(conversations)} checked-in conversations at {len(monitored)} monitored properties", flush=True)
-    print(f"[GuestHealth] Monitored listing_ids sample: {listing_ids[:3]}...", flush=True)
+    print(f"[GuestHealth] Found {len(all_threads)} checked-in threads at monitored properties", flush=True)
+    
+    # Get confirmed reservation IDs from GuestIndex
+    # GuestIndex is synced from reservations API with status filter (only confirmed)
+    confirmed_reservation_ids = set(
+        r[0] for r in db.query(GuestIndex.reservation_id).filter(
+            GuestIndex.reservation_id.isnot(None)
+        ).all()
+    )
+    
+    print(f"[GuestHealth] Have {len(confirmed_reservation_ids)} confirmed reservation IDs in GuestIndex", flush=True)
+    
+    # Filter to only CONFIRMED threads (reservation_id exists in GuestIndex)
+    confirmed_threads = [
+        t for t in all_threads 
+        if t.reservation_id and t.reservation_id in confirmed_reservation_ids
+    ]
+    
+    print(f"[GuestHealth] {len(confirmed_threads)} are CONFIRMED reservations (will analyze)", flush=True)
+    print(f"[GuestHealth] {len(all_threads) - len(confirmed_threads)} are inquiries (skipped)", flush=True)
     
     analyzed = 0
     errors = 0
     
-    for i, conv in enumerate(conversations):
-        print(f"[GuestHealth] [{i+1}/{len(conversations)}] Analyzing {conv.guest_name}...", flush=True)
-        result = await analyze_conversation(db, conv)
+    for i, thread in enumerate(confirmed_threads):
+        print(f"[GuestHealth] [{i+1}/{len(confirmed_threads)}] Analyzing {thread.guest_name}...", flush=True)
+        result = await analyze_hostify_thread(db, thread)
         if result:
             analyzed += 1
         else:
             errors += 1
-        # Small delay to be nice to OpenAI API
+        # Small delay to be nice to APIs
         await asyncio.sleep(0.2)
     
     return {
         "status": "complete",
         "properties_monitored": len(monitored),
-        "guests_found": len(conversations),
+        "guests_found": len(confirmed_threads),
         "guests_analyzed": analyzed,
         "errors": errors
     }
@@ -1547,26 +1559,34 @@ async def refresh_inquiry_analysis(db: Session, days_back: int = 30, limit: int 
     
     listing_ids = [p["listing_id"] for p in monitored]
     
-    # Get confirmed reservation IDs to exclude
     now = datetime.utcnow()
     cutoff_date = now - timedelta(days=days_back)
     
-    confirmed_reservation_ids = [
-        g.reservation_id for g in db.query(GuestIndex.reservation_id).filter(
-            GuestIndex.listing_id.in_(listing_ids),
+    # Get ALL confirmed reservation IDs from GuestIndex
+    # Don't filter by listing_id since they don't match between APIs
+    confirmed_reservation_ids = set(
+        r[0] for r in db.query(GuestIndex.reservation_id).filter(
             GuestIndex.reservation_id.isnot(None)
         ).all()
-    ]
+    )
     
-    # Find threads that are NOT confirmed reservations (inquiries)
-    # Look for threads from the past N days at monitored properties
-    inquiry_threads = db.query(HostifyThread).filter(
+    print(f"[InquiryAnalysis] Have {len(confirmed_reservation_ids)} confirmed reservation IDs", flush=True)
+    
+    # Get all threads at monitored properties with dates in range
+    all_threads = db.query(HostifyThread).filter(
         HostifyThread.listing_id.in_(listing_ids),
-        HostifyThread.checkin >= cutoff_date,  # Inquired for dates after cutoff
-        ~HostifyThread.reservation_id.in_(confirmed_reservation_ids) if confirmed_reservation_ids else True
-    ).order_by(HostifyThread.last_message_at.desc()).limit(limit).all()
+        HostifyThread.checkin >= cutoff_date
+    ).order_by(HostifyThread.last_message_at.desc()).all()
     
-    print(f"[InquiryAnalysis] Found {len(inquiry_threads)} inquiry threads to analyze")
+    print(f"[InquiryAnalysis] Found {len(all_threads)} total threads at monitored properties", flush=True)
+    
+    # Filter to only INQUIRIES (reservation_id NOT in GuestIndex)
+    inquiry_threads = [
+        t for t in all_threads
+        if not t.reservation_id or t.reservation_id not in confirmed_reservation_ids
+    ][:limit]
+    
+    print(f"[InquiryAnalysis] {len(inquiry_threads)} are inquiries (not confirmed)", flush=True)
     
     analyzed = 0
     errors = 0
