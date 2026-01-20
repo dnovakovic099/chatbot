@@ -701,14 +701,17 @@ async def refresh_all_guest_health(db: Session) -> Dict[str, Any]:
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
+    # Query threads - a guest is checked in if: checkin <= now AND checkout >= today
+    # Having checkin/checkout dates indicates an actual booking (not just an inquiry)
     threads = db.query(HostifyThread).filter(
         HostifyThread.listing_id.in_(listing_ids),
+        HostifyThread.checkin.isnot(None),
         HostifyThread.checkin <= now,
-        HostifyThread.checkout >= today,
-        HostifyThread.reservation_id.isnot(None)  # Only confirmed reservations
+        HostifyThread.checkout >= today
     ).all()
     
     print(f"[GuestHealth] Found {len(threads)} checked-in threads at {len(monitored)} monitored properties", flush=True)
+    print(f"[GuestHealth] Monitored listing_ids: {listing_ids[:5]}...", flush=True)
     
     analyzed = 0
     errors = 0
